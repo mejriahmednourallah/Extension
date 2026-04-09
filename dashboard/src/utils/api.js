@@ -1,6 +1,10 @@
 import axios from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const BACKEND_PROBE_MAX_ATTEMPTS = 12;
+const BACKEND_PROBE_BASE_DELAY_MS = 1500;
+const BACKEND_PROBE_TIMEOUT_MS = 12000;
+const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -8,6 +12,80 @@ const apiClient = axios.create({
     'Content-Type': 'application/json',
   },
 });
+
+let backendHealthyUntil = 0;
+let backendProbePromise = null;
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function ensureBackendHealthy() {
+  if (backendHealthyUntil > Date.now()) {
+    return;
+  }
+
+  if (backendProbePromise) {
+    return backendProbePromise;
+  }
+
+  backendProbePromise = (async () => {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= BACKEND_PROBE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await apiClient.get('/health', {
+          timeout: BACKEND_PROBE_TIMEOUT_MS,
+          headers: {
+            'Cache-Control': 'no-cache',
+          },
+        });
+
+        if (!response || response.status < 200 || response.status >= 300) {
+          throw new Error(`Health check failed with status ${response ? response.status : 'unknown'}`);
+        }
+
+        const payload = response.data || {};
+        if (payload.status && String(payload.status).toLowerCase() !== 'ok') {
+          throw new Error(`Backend reported non-ok status: ${payload.status}`);
+        }
+
+        backendHealthyUntil = Date.now() + BACKEND_HEALTH_CACHE_TTL_MS;
+        return;
+      } catch (error) {
+        lastError = error;
+
+        if (attempt < BACKEND_PROBE_MAX_ATTEMPTS) {
+          const delayMs = BACKEND_PROBE_BASE_DELAY_MS * attempt;
+          await wait(delayMs);
+        }
+      }
+    }
+
+    throw new Error(
+      `Backend is still waking up. Last probe error: ${String(lastError && lastError.message ? lastError.message : lastError)}`
+    );
+  })();
+
+  try {
+    await backendProbePromise;
+  } finally {
+    backendProbePromise = null;
+  }
+}
+
+apiClient.interceptors.request.use(
+  async (config) => {
+    const requestPath = String(config && config.url ? config.url : '');
+    if (!requestPath || requestPath === '/health') {
+      return config;
+    }
+
+    await ensureBackendHealthy();
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
 // Alerts API
 export const alertsAPI = {

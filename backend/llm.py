@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from threading import Lock
 from typing import Any
 
 import google.generativeai as genai
@@ -48,6 +49,10 @@ _GROQ_FALLBACK_EXCEPTIONS = (
     PermissionDeniedError,
     BadRequestError,
 )
+
+_PROVIDER_SEQUENCE = ("groq", "gemini")
+_PROVIDER_ROTATION_LOCK = Lock()
+_provider_rotation_index = 0
 
 
 def build_prompt(post_text: str, client_name: str, keywords: list[str]) -> str:
@@ -176,11 +181,32 @@ def _match_keywords(post_text: str, keywords: list[str]) -> list[str]:
     return matched
 
 
-async def call_groq(prompt: str) -> str:
-    if not settings.groq_api_key:
+def _build_key_pool(primary_key: str, extra_keys: tuple[str, ...]) -> list[str]:
+    ordered = [str(primary_key or "").strip(), *[str(item or "").strip() for item in extra_keys]]
+    filtered = [item for item in ordered if item]
+    if not filtered:
+        return []
+
+    # Keep order while deduplicating.
+    return list(dict.fromkeys(filtered))
+
+
+def _next_provider_order() -> tuple[str, str]:
+    global _provider_rotation_index
+
+    with _PROVIDER_ROTATION_LOCK:
+        first = _PROVIDER_SEQUENCE[_provider_rotation_index]
+        _provider_rotation_index = (_provider_rotation_index + 1) % len(_PROVIDER_SEQUENCE)
+
+    second = "gemini" if first == "groq" else "groq"
+    return first, second
+
+
+async def call_groq(prompt: str, api_key: str) -> str:
+    if not api_key:
         raise RuntimeError("Missing GROQ_API_KEY")
 
-    client = AsyncGroq(api_key=settings.groq_api_key)
+    client = AsyncGroq(api_key=api_key)
     response = await client.chat.completions.create(
         model=settings.groq_model,
         messages=[
@@ -197,11 +223,11 @@ async def call_groq(prompt: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def _call_gemini_sync(prompt: str) -> str:
-    if not settings.gemini_api_key:
+def _call_gemini_sync(prompt: str, api_key: str) -> str:
+    if not api_key:
         raise RuntimeError("Missing GEMINI_API_KEY")
 
-    genai.configure(api_key=settings.gemini_api_key)
+    genai.configure(api_key=api_key)
     model = genai.GenerativeModel(settings.gemini_model)
     generation_config = {
         "temperature": 0.1,
@@ -232,44 +258,112 @@ def _call_gemini_sync(prompt: str) -> str:
     return "\n".join(candidate_text_parts)
 
 
-async def call_gemini(prompt: str) -> str:
-    return await asyncio.to_thread(_call_gemini_sync, prompt)
+async def call_gemini(prompt: str, api_key: str) -> str:
+    return await asyncio.to_thread(_call_gemini_sync, prompt, api_key)
+
+
+async def _call_groq_with_key_rotation(prompt: str, keys: list[str]) -> str:
+    if not keys:
+        raise RuntimeError("Missing GROQ_API_KEY")
+
+    last_error: Exception | None = None
+    for index, key in enumerate(keys, start=1):
+        try:
+            return await call_groq(prompt, key)
+        except _GROQ_FALLBACK_EXCEPTIONS as exc:
+            last_error = exc
+            if index < len(keys):
+                logger.warning(
+                    "Groq key %s/%s failed (%s). Trying next Groq key.",
+                    index,
+                    len(keys),
+                    exc,
+                )
+            else:
+                logger.warning("Groq key %s/%s failed (%s).", index, len(keys), exc)
+        except Exception as exc:
+            last_error = exc
+            if index < len(keys):
+                logger.warning(
+                    "Groq key %s/%s error (%s). Trying next Groq key.",
+                    index,
+                    len(keys),
+                    exc,
+                )
+            else:
+                logger.warning("Groq key %s/%s error (%s).", index, len(keys), exc)
+
+    raise last_error or RuntimeError("Groq failed with all configured keys")
+
+
+async def _call_gemini_with_key_rotation(prompt: str, keys: list[str]) -> str:
+    if not keys:
+        raise RuntimeError("Missing GEMINI_API_KEY")
+
+    last_error: Exception | None = None
+    for index, key in enumerate(keys, start=1):
+        try:
+            return await call_gemini(prompt, key)
+        except Exception as exc:
+            last_error = exc
+            if index < len(keys):
+                logger.warning(
+                    "Gemini key %s/%s failed (%s). Trying next Gemini key.",
+                    index,
+                    len(keys),
+                    exc,
+                )
+            else:
+                logger.warning("Gemini key %s/%s failed (%s).", index, len(keys), exc)
+
+    raise last_error or RuntimeError("Gemini failed with all configured keys")
+
+
+async def _analyze_with_provider(provider: str, prompt: str, keys: list[str]) -> dict[str, Any]:
+    if provider == "groq":
+        raw_result = await _call_groq_with_key_rotation(prompt, keys)
+    elif provider == "gemini":
+        raw_result = await _call_gemini_with_key_rotation(prompt, keys)
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
+
+    parsed, parse_ok = _parse_json_response_with_status(raw_result)
+    if not parse_ok:
+        raise ValueError(f"{provider} returned invalid or non-JSON content")
+    return parsed
 
 
 async def analyze_post(post_text: str, client_name: str, keywords: list[str]) -> dict[str, Any]:
     prompt = build_prompt(post_text, client_name, keywords)
-    parsed: dict[str, Any]
-    groq_error: Exception | None = None
+    parsed: dict[str, Any] = dict(_NEUTRAL_DEFAULT)
 
-    try:
-        groq_result = await call_groq(prompt)
-        parsed, parse_ok = _parse_json_response_with_status(groq_result)
-        if not parse_ok:
-            raise ValueError("Groq returned invalid or non-JSON content")
-    except _GROQ_FALLBACK_EXCEPTIONS as exc:
-        groq_error = exc
-        logger.warning(
-            "Groq temporary/provider failure (%s). Falling back to Gemini.",
-            exc,
-        )
-    except Exception as exc:
-        groq_error = exc
-        logger.warning("Groq failed (%s). Falling back to Gemini.", exc)
+    groq_keys = _build_key_pool(settings.groq_api_key, settings.groq_api_keys)
+    gemini_keys = _build_key_pool(settings.gemini_api_key, settings.gemini_api_keys)
+    provider_order = _next_provider_order()
 
-    if groq_error is not None:
+    provider_errors: dict[str, Exception] = {}
+
+    for provider in provider_order:
+        keys = groq_keys if provider == "groq" else gemini_keys
+        if not keys:
+            provider_errors[provider] = RuntimeError(f"No {provider} API keys configured")
+            logger.warning("Skipping %s because no API key is configured.", provider.capitalize())
+            continue
+
         try:
-            gemini_result = await call_gemini(prompt)
-            parsed, parse_ok = _parse_json_response_with_status(gemini_result)
-            if not parse_ok:
-                logger.warning("Gemini returned invalid JSON. Using neutral default.")
-                parsed = dict(_NEUTRAL_DEFAULT)
-        except Exception as gemini_exc:
-            logger.error(
-                "Both LLM providers failed. Groq error: %s | Gemini error: %s",
-                groq_error,
-                gemini_exc,
-            )
-            parsed = dict(_NEUTRAL_DEFAULT)
+            parsed = await _analyze_with_provider(provider, prompt, keys)
+            break
+        except Exception as exc:
+            provider_errors[provider] = exc
+            other = "Gemini" if provider == "groq" else "Groq"
+            logger.warning("%s failed (%s). Trying %s.", provider.capitalize(), exc, other)
+    else:
+        logger.error(
+            "Both LLM providers failed. Groq error: %s | Gemini error: %s",
+            provider_errors.get("groq"),
+            provider_errors.get("gemini"),
+        )
+        parsed = dict(_NEUTRAL_DEFAULT)
 
     if not parsed.get("keywords_matched"):
         parsed["keywords_matched"] = _match_keywords(post_text, keywords)

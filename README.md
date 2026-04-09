@@ -83,6 +83,11 @@ Fill in at least:
 - SMTP_PASSWORD
 - ALERT_EMAIL_FROM
 
+Optional for automatic key rotation on rate limits (comma/semicolon/newline separated):
+
+- GROQ_API_KEYS
+- GEMINI_API_KEYS
+
 2. Start backend
 
 ```bash

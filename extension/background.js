@@ -94,8 +94,14 @@ const BRAND_SPECIFIC_KEYWORDS = new Set(
 );
 
 const NEGATIVE_SENTIMENTS = new Set(["negative", "very_negative"]);
+const BACKEND_PROBE_MAX_ATTEMPTS = 12;
+const BACKEND_PROBE_BASE_DELAY_MS = 1500;
+const BACKEND_PROBE_TIMEOUT_MS = 12000;
+const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
+
 const analyzeQueue = [];
 let analyzeWorkerRunning = false;
+const backendHealthyUntilByUrl = new Map();
 
 function storageGet(keys) {
   return new Promise((resolve) => {
@@ -107,6 +113,21 @@ function storageSet(values) {
   return new Promise((resolve) => {
     chrome.storage.local.set(values, () => resolve());
   });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = BACKEND_PROBE_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function sanitizeBackendUrl(url) {
@@ -147,6 +168,65 @@ function countUnreadNegative(alerts) {
   return alerts.filter(
     (item) => !item.read && NEGATIVE_SENTIMENTS.has((item.sentiment || "").toLowerCase())
   ).length;
+}
+
+function buildBackendHeaders(backendUrl) {
+  const headers = { "Content-Type": "application/json" };
+  if (/^https?:\/\/[^/]*pinggy(-free)?\.link/i.test(backendUrl)) {
+    headers["X-Pinggy-No-Screen"] = "1";
+  }
+  return headers;
+}
+
+async function probeBackendHealth(backendUrl, headers) {
+  const healthyUntil = Number(backendHealthyUntilByUrl.get(backendUrl) || 0);
+  if (healthyUntil > Date.now()) {
+    return;
+  }
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= BACKEND_PROBE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(`${backendUrl}/health`, {
+        method: "GET",
+        headers
+      });
+
+      if (!response.ok) {
+        throw new Error(`Health check failed with status ${response.status}`);
+      }
+
+      const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      if (contentType.includes("application/json")) {
+        const payload = await response.json().catch(() => ({}));
+        if (payload && payload.status && String(payload.status).toLowerCase() !== "ok") {
+          throw new Error(`Backend reported non-ok status: ${payload.status}`);
+        }
+      } else {
+        const body = await response.text();
+        if (/pinggy\.web\.debugger|screen\.html/i.test(body)) {
+          throw new Error(
+            "Backend URL points to Pinggy debugger page, not API tunnel. Use the direct public tunnel URL that forwards to localhost:8000."
+          );
+        }
+      }
+
+      backendHealthyUntilByUrl.set(backendUrl, Date.now() + BACKEND_HEALTH_CACHE_TTL_MS);
+      return;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < BACKEND_PROBE_MAX_ATTEMPTS) {
+        const delayMs = BACKEND_PROBE_BASE_DELAY_MS * attempt;
+        await wait(delayMs);
+      }
+    }
+  }
+
+  throw new Error(
+    `Backend is still waking up. Last probe error: ${String(lastError && lastError.message ? lastError.message : lastError)}`
+  );
 }
 
 async function updateBadge(unreadCount) {
@@ -273,12 +353,12 @@ async function callAnalyzeApi(posts) {
   };
 
   const backendUrl = sanitizeBackendUrl(config.backend_url);
-  const headers = { "Content-Type": "application/json" };
-  if (/^https?:\/\/[^/]*pinggy(-free)?\.link/i.test(backendUrl)) {
-    headers["X-Pinggy-No-Screen"] = "1";
-  }
+  const headers = buildBackendHeaders(backendUrl);
 
-  const response = await fetch(`${backendUrl}/analyze`, {
+  // Render free services can be cold; probe health with retries before analyze.
+  await probeBackendHealth(backendUrl, headers);
+
+  const response = await fetchWithTimeout(`${backendUrl}/analyze`, {
     method: "POST",
     headers,
     body: JSON.stringify(payload)
