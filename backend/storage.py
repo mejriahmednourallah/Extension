@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from threading import Lock
@@ -49,6 +50,49 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if lowered in {"0", "false", "no", "off", ""}:
         return False
     return default
+
+
+def _detect_language_bucket(text: str | None) -> str:
+    value = str(text or "").strip().lower()
+    if not value:
+        return "mixte"
+
+    has_arabic = bool(re.search(r"[\u0600-\u06FF]", value))
+    has_latin = bool(re.search(r"[a-zàâçéèêëîïôûùüÿñæœ]", value, flags=re.IGNORECASE))
+
+    darija_markers = {
+        "برشة",
+        "برشا",
+        "بزاف",
+        "شنية",
+        "علاش",
+        "خاطر",
+        "باش",
+        "ديما",
+        "ياسر",
+        "barsha",
+        "brcha",
+        "barcha",
+        "3lech",
+        "chnowa",
+        "chnia",
+        "khater",
+        "bech",
+        "yesser",
+        "barcha",
+    }
+
+    has_darija_marker = any(marker in value for marker in darija_markers)
+
+    if has_arabic and has_latin:
+        return "mixte"
+    if has_darija_marker:
+        return "darija"
+    if has_arabic:
+        return "arabic"
+    if has_latin:
+        return "french"
+    return "mixte"
 
 
 def init_db() -> None:
@@ -750,6 +794,14 @@ def get_alert_stats() -> dict[str, Any]:
                 """
             ).fetchall()
 
+            language_rows = conn.execute(
+                """
+                SELECT post_text
+                FROM alerts
+                WHERE datetime(created_at) >= datetime('now', '-1 day')
+                """
+            ).fetchall()
+
             last_scan_at = conn.execute("SELECT MAX(created_at) AS max_created FROM alerts").fetchone()[
                 "max_created"
             ]
@@ -782,6 +834,17 @@ def get_alert_stats() -> dict[str, Any]:
 
     daily_sentiment_7d = list(daily_map.values())
 
+    language_distribution_24h = {
+        "darija": 0,
+        "french": 0,
+        "arabic": 0,
+        "mixte": 0,
+    }
+
+    for row in language_rows:
+        bucket = _detect_language_bucket(row["post_text"])
+        language_distribution_24h[bucket] = int(language_distribution_24h.get(bucket, 0)) + 1
+
     return {
         "total_posts": total_posts,
         "total_posts_today": total_posts_today,
@@ -789,6 +852,7 @@ def get_alert_stats() -> dict[str, Any]:
         "groups_active_count": groups_active_count,
         "avg_score_24h": avg_score_24h,
         "sentiment_counts_24h": sentiment_counts_24h,
+        "language_distribution_24h": language_distribution_24h,
         "daily_sentiment_7d": daily_sentiment_7d,
         "last_scan_at": last_scan_at,
     }

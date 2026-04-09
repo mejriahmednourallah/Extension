@@ -5,6 +5,12 @@ import { systemAPI } from '../utils/api';
 export default function Analytics() {
   const [weekData, setWeekData] = useState([]);
   const [score, setScore] = useState(0);
+  const [languagePct, setLanguagePct] = useState({
+    darija: 0,
+    french: 0,
+    arabic: 0,
+    mixte: 0,
+  });
 
   useEffect(() => {
     (async () => {
@@ -22,6 +28,26 @@ export default function Analytics() {
       setWeekData(chart);
       const avgScore24h = Number(data.avg_score_24h || 0);
       setScore(Math.round(Math.max(0, Math.min(100, (avgScore24h + 1) * 50))));
+
+      const dist = data.language_distribution_24h || {};
+      const counts = {
+        darija: Number(dist.darija || 0),
+        french: Number(dist.french || 0),
+        arabic: Number(dist.arabic || 0),
+        mixte: Number(dist.mixte || 0),
+      };
+      const total = counts.darija + counts.french + counts.arabic + counts.mixte;
+
+      if (total <= 0) {
+        setLanguagePct({ darija: 0, french: 0, arabic: 0, mixte: 0 });
+      } else {
+        setLanguagePct({
+          darija: Math.round((counts.darija / total) * 100),
+          french: Math.round((counts.french / total) * 100),
+          arabic: Math.round((counts.arabic / total) * 100),
+          mixte: Math.round((counts.mixte / total) * 100),
+        });
+      }
     })();
   }, []);
 
@@ -76,22 +102,22 @@ export default function Analytics() {
         <div className="stats-grid">
           <div className="stat-card">
             <div className="stat-label">Darija</div>
-            <div className="stat-value">54%</div>
+            <div className="stat-value">{languagePct.darija}%</div>
             <div className="stat-bar" style={{ background: '#334155' }}></div>
           </div>
           <div className="stat-card">
             <div className="stat-label">Français</div>
-            <div className="stat-value">28%</div>
+            <div className="stat-value">{languagePct.french}%</div>
             <div className="stat-bar" style={{ background: '#22c55e' }}></div>
           </div>
           <div className="stat-card">
             <div className="stat-label">Arabe</div>
-            <div className="stat-value">12%</div>
+            <div className="stat-value">{languagePct.arabic}%</div>
             <div className="stat-bar" style={{ background: '#f97316' }}></div>
           </div>
           <div className="stat-card">
             <div className="stat-label">Mixte</div>
-            <div className="stat-value">6%</div>
+            <div className="stat-value">{languagePct.mixte}%</div>
             <div className="stat-bar" style={{ background: '#a855f7' }}></div>
           </div>
         </div>

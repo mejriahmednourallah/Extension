@@ -85,6 +85,7 @@ class AlertStatsResponse(BaseModel):
     groups_active_count: int
     avg_score_24h: float
     sentiment_counts_24h: dict
+    language_distribution_24h: dict
     daily_sentiment_7d: List[dict]
     last_scan_at: str | None
 

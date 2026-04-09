@@ -182,6 +182,12 @@ export const systemAPI = {
           groups_active_count: 0,
           avg_score_24h: 0,
           sentiment_counts_24h: {},
+          language_distribution_24h: {
+            darija: 0,
+            french: 0,
+            arabic: 0,
+            mixte: 0,
+          },
           daily_sentiment_7d: [],
           last_scan_at: null,
         },
