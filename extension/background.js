@@ -136,32 +136,43 @@ function sanitizeBackendUrl(url) {
     return DEFAULT_CONFIG.backend_url;
   }
 
-  if (!/^https?:\/\//i.test(value)) {
-    const lowerValue = value.toLowerCase();
-    const inferredScheme =
-      lowerValue.startsWith("localhost") || lowerValue.startsWith("127.0.0.1")
-        ? "http"
-        : "https";
-    return `${inferredScheme}://${value}`.replace(/\/$/, "");
+  const withScheme = /^https?:\/\//i.test(value)
+    ? value
+    : `${/^(localhost|127\.0\.0\.1)/i.test(value) ? "http" : "https"}://${value}`;
+
+  let parsed;
+  try {
+    parsed = new URL(withScheme);
+  } catch (error) {
+    // Last-resort fallback if URL constructor fails on unusual input.
+    return withScheme.replace(/\/$/, "");
   }
 
-  const normalized = value.replace(/\/$/, "");
+  const host = parsed.hostname.toLowerCase();
+  const isPinggy = /pinggy(-free)?\.link$/i.test(host);
+  const isRender = host === "onrender.com" || host.endsWith(".onrender.com");
 
-  // If user pasted a full endpoint URL, keep only the API base URL.
-  const endpointStripped = normalized.replace(/\/(analyze|history|health)$/i, "");
-
-  // Pinggy links generally operate over HTTPS and HTTP can redirect, which
-  // may break CORS preflight in browser extensions.
-  if (/^http:\/\/[^/]*pinggy(-free)?\.link/i.test(endpointStripped)) {
-    return endpointStripped.replace(/^http:\/\//i, "https://");
+  if (isPinggy || isRender) {
+    parsed.protocol = "https:";
   }
 
-  // Render services are HTTPS-only in production.
-  if (/^http:\/\/[^/]*\.onrender\.com/i.test(endpointStripped)) {
-    return endpointStripped.replace(/^http:\/\//i, "https://");
+  const normalizedPath = parsed.pathname.replace(/\/+$/, "") || "";
+  const lowerPath = normalizedPath.toLowerCase();
+  const isDirectEndpoint = ["/analyze", "/history", "/health"].includes(lowerPath);
+
+  if (isRender && (isDirectEndpoint || lowerPath === "" || lowerPath === "/")) {
+    parsed.pathname = "";
+  } else if (isDirectEndpoint) {
+    parsed.pathname = "";
+  } else {
+    parsed.pathname = normalizedPath;
   }
 
-  return endpointStripped;
+  parsed.search = "";
+  parsed.hash = "";
+
+  const path = parsed.pathname === "/" ? "" : parsed.pathname;
+  return `${parsed.origin}${path}`;
 }
 
 function countUnreadNegative(alerts) {

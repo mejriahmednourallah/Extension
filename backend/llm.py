@@ -50,7 +50,7 @@ _GROQ_FALLBACK_EXCEPTIONS = (
     BadRequestError,
 )
 
-_PROVIDER_SEQUENCE = ("groq", "gemini")
+_PROVIDER_SEQUENCE = ("gemini", "groq")
 _PROVIDER_ROTATION_LOCK = Lock()
 _provider_rotation_index = 0
 
