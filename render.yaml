@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: e-reputation-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: bash render-build.sh
+    startCommand: bash render-start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BACKEND_CORS_ORIGINS
+        value: "*"
+
+  - type: web
+    name: e-reputation-dashboard
+    runtime: static
+    rootDir: dashboard
+    plan: free
+    buildCommand: bash render-build.sh
+    staticPublishPath: build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://e-reputation-backend.onrender.com

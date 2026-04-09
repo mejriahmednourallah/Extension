@@ -1,0 +1,50 @@
+
+{
+  "manifest_version": 3,
+  "name": "E-Reputation Watcher",
+  "version": "1.0.0",
+  "description": "Surveillance e-reputation Facebook groupes",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://web.facebook.com/*",
+    "https://m.facebook.com/*",
+    "http://localhost:8000/*",
+    "https://*.onrender.com/*",
+    "https://*.pinggy.link/*",
+    "http://*.pinggy.link/*",
+    "https://*.pinggy-free.link/*",
+    "http://*.pinggy-free.link/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.facebook.com/groups/*",
+        "https://web.facebook.com/groups/*",
+        "https://m.facebook.com/groups/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
