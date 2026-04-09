@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { alertsAPI, groupsAPI } from '../utils/api';
+import { alertsAPI, groupsAPI, systemAPI } from '../utils/api';
 import { formatRelativeTime, formatNumber, truncateText } from '../utils/formatters';
 import { sentimentToColor } from '../utils/colors';
 
@@ -12,7 +12,7 @@ export default function Overview() {
     alertCount: 0,
     groupCount: 0,
     avgScore: 0,
-    uptime: '99.8%',
+    uptime: 'Live',
   });
 
   useEffect(() => {
@@ -22,28 +22,28 @@ export default function Overview() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [alertsRes, groupsRes] = await Promise.all([
+      const [alertsRes, groupsRes, statsRes] = await Promise.all([
         alertsAPI.getHistory(10),
-        groupsAPI.getAll().catch(() => ({ data: [] })),
+        groupsAPI.getAll(true).catch(() => ({ data: [] })),
+        systemAPI.stats().catch(() => ({ data: {} })),
       ]);
 
       const alertsData = alertsRes.data || [];
       const groupsData = groupsRes.data || [];
+      const statsData = statsRes.data || {};
 
       setAlerts(alertsData);
       setGroups(groupsData);
 
-      const totalPosts = alertsData.length;
-      const avgScore = alertsData.length > 0
-        ? (alertsData.reduce((sum, a) => sum + (a.score || 0), 0) / alertsData.length * 100).toFixed(0)
-        : 0;
+      const avgScore = Number(statsData.avg_score_24h || 0);
+      const normalizedAvgScore = Math.round(Math.max(0, Math.min(100, (avgScore + 1) * 50)));
 
       setStats({
-        totalPosts,
-        alertCount: alertsData.length,
-        groupCount: groupsData.length,
-        avgScore,
-        uptime: '99.8%',
+        totalPosts: Number(statsData.total_posts_today || statsData.total_posts || 0),
+        alertCount: Number(statsData.alerts_today || 0),
+        groupCount: Number(statsData.groups_active_count || groupsData.filter((g) => g.enabled !== false).length),
+        avgScore: normalizedAvgScore,
+        uptime: statsData.last_scan_at ? 'Live' : 'Idle',
       });
     } catch (error) {
       console.error('Error fetching overview data:', error);
@@ -137,11 +137,11 @@ export default function Overview() {
                   Aucun groupe
                 </div>
               ) : (
-                groups.slice(0, 5).map((group) => (
+                groups.filter((group) => group.enabled !== false).slice(0, 5).map((group) => (
                   <div key={group.id} className="agent-item">
                     <div style={{ fontWeight: 600, fontSize: '13px' }}>{group.name}</div>
                     <div style={{ fontSize: '11px', color: 'var(--text2)', marginTop: '4px' }}>
-                      {group.post_count || 0} posts
+                      {group.group_url || group.url || 'No link'}
                     </div>
                   </div>
                 ))

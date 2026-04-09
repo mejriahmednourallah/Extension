@@ -6,7 +6,13 @@ export default function Groups() {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({ name: '', url: '', category: 'marque', interval: 15 });
+  const [formData, setFormData] = useState({
+    name: '',
+    url: '',
+    category: 'marque',
+    interval: 15,
+    enabled: true,
+  });
 
   useEffect(() => {
     fetchGroups();
@@ -15,7 +21,7 @@ export default function Groups() {
   const fetchGroups = async () => {
     try {
       setLoading(true);
-      const response = await groupsAPI.getAll();
+      const response = await groupsAPI.getAll(true);
       setGroups(response.data || []);
     } catch (error) {
       console.error('Error fetching groups:', error);
@@ -28,11 +34,20 @@ export default function Groups() {
     e.preventDefault();
     try {
       await groupsAPI.create(formData);
-      setFormData({ name: '', url: '', category: 'marque', interval: 15 });
+      setFormData({ name: '', url: '', category: 'marque', interval: 15, enabled: true });
       setShowModal(false);
       fetchGroups();
     } catch (error) {
       console.error('Error adding group:', error);
+    }
+  };
+
+  const handleToggleGroup = async (group) => {
+    try {
+      await groupsAPI.update(group.id, { enabled: !(group.enabled !== false) });
+      fetchGroups();
+    } catch (error) {
+      console.error('Error toggling group:', error);
     }
   };
 
@@ -57,7 +72,7 @@ export default function Groups() {
         <div>
           <h2 style={{ fontSize: '18px', fontWeight: 700 }}>Groupes Facebook</h2>
           <p style={{ fontSize: '13px', color: 'var(--text2)', marginTop: '3px' }}>
-            {groups.length} groupe{groups.length !== 1 ? 's' : ''} surveillé{groups.length !== 1 ? 's' : ''}
+            {groups.filter((group) => group.enabled !== false).length} groupe{groups.length !== 1 ? 's' : ''} actif{groups.length !== 1 ? 's' : ''}
           </p>
         </div>
         <button className="btn-primary" onClick={() => setShowModal(true)}>
@@ -81,14 +96,30 @@ export default function Groups() {
                     <span className="badge" style={{ background: categoryColor.background, color: 'white', marginTop: '8px' }}>
                       {categoryColor.label}
                     </span>
+                    <span
+                      className="badge"
+                      style={{
+                        marginTop: '8px',
+                        marginLeft: '8px',
+                        background: group.enabled !== false ? '#16a34a' : '#64748b',
+                        color: '#fff',
+                      }}
+                    >
+                      {group.enabled !== false ? 'Actif' : 'Pause'}
+                    </span>
                   </div>
                   <button className="delete-btn" onClick={() => handleDeleteGroup(group.id)}>
                     ✕
                   </button>
                 </div>
                 <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--text2)' }}>
-                  <div>Posts: {group.post_count || 0}</div>
-                  <div>Alertes: {group.alert_count || 0}</div>
+                  <div>URL: {group.group_url || group.url || 'n/a'}</div>
+                  <div>Intervalle: {group.scan_interval_minutes || group.interval || 15} min</div>
+                </div>
+                <div style={{ marginTop: '10px' }}>
+                  <button className="btn-secondary" onClick={() => handleToggleGroup(group)}>
+                    {group.enabled !== false ? 'Mettre en pause' : 'Activer'}
+                  </button>
                 </div>
               </div>
             );
@@ -148,6 +179,17 @@ export default function Groups() {
                     max="180"
                   />
                 </div>
+              </div>
+
+              <div className="form-field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <input
+                    type="checkbox"
+                    checked={formData.enabled}
+                    onChange={(e) => setFormData({ ...formData, enabled: e.target.checked })}
+                  />
+                  Activer ce groupe
+                </label>
               </div>
 
               <div className="modal-actions">

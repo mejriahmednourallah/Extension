@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { alertsAPI } from '../utils/api';
-import { formatRelativeTime, formatScore } from '../utils/formatters';
+import { formatRelativeTime } from '../utils/formatters';
 import { sentimentToColor } from '../utils/colors';
 
 export default function BadBuzz() {
   const [alerts, setAlerts] = useState([]);
   const [filter, setFilter] = useState('all');
+  const [sortBy, setSortBy] = useState('priority');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -15,8 +16,8 @@ export default function BadBuzz() {
   const fetchAlerts = async () => {
     try {
       setLoading(true);
-      const response = await alertsAPI.getHistory(50).catch(() => ({ data: [] }));
-      const filtered = response.data?.filter((a) => a.sentiment === 'très_négatif' || a.sentiment === 'négatif') || [];
+      const response = await alertsAPI.getBadBuzz(100).catch(() => ({ data: [] }));
+      const filtered = response.data?.filter((a) => a.sentiment === 'very_negative' || a.sentiment === 'negative') || [];
       setAlerts(filtered);
     } catch (error) {
       console.error('Error fetching alerts:', error);
@@ -25,7 +26,15 @@ export default function BadBuzz() {
     }
   };
 
-  const filteredAlerts = filter === 'all' ? alerts : alerts.filter((a) => a.sentiment === filter);
+  const filteredAlerts = (filter === 'all' ? alerts : alerts.filter((a) => a.sentiment === filter)).sort((a, b) => {
+    if (sortBy === 'engagement') {
+      return Number(b.engagement_total || 0) - Number(a.engagement_total || 0);
+    }
+    if (sortBy === 'recent') {
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    }
+    return Number(b.priority_score || 0) - Number(a.priority_score || 0);
+  });
 
   const handleCopyResponse = (text) => {
     navigator.clipboard.writeText(text);
@@ -49,16 +58,34 @@ export default function BadBuzz() {
           Tous les cas
         </button>
         <button
-          className={`bb-filter ${filter === 'très_négatif' ? 'active' : ''}`}
-          onClick={() => setFilter('très_négatif')}
+          className={`bb-filter ${filter === 'very_negative' ? 'active' : ''}`}
+          onClick={() => setFilter('very_negative')}
         >
           Tres negatif
         </button>
         <button
-          className={`bb-filter ${filter === 'négatif' ? 'active' : ''}`}
-          onClick={() => setFilter('négatif')}
+          className={`bb-filter ${filter === 'negative' ? 'active' : ''}`}
+          onClick={() => setFilter('negative')}
         >
           Negatif
+        </button>
+        <button
+          className={`bb-filter ${sortBy === 'priority' ? 'active' : ''}`}
+          onClick={() => setSortBy('priority')}
+        >
+          Par risque
+        </button>
+        <button
+          className={`bb-filter ${sortBy === 'engagement' ? 'active' : ''}`}
+          onClick={() => setSortBy('engagement')}
+        >
+          Engagement
+        </button>
+        <button
+          className={`bb-filter ${sortBy === 'recent' ? 'active' : ''}`}
+          onClick={() => setSortBy('recent')}
+        >
+          Recent
         </button>
       </div>
 
@@ -74,6 +101,16 @@ export default function BadBuzz() {
         ) : (
           filteredAlerts.map((alert) => {
             const colors = sentimentToColor(alert.sentiment);
+            const llmSuggestions = Array.isArray(alert.bad_buzz_suggestions)
+              ? alert.bad_buzz_suggestions.map((item) => String(item || '').trim()).filter(Boolean)
+              : [];
+            const fallbackSuggestions = [
+              'Nous comprenons votre frustration et prenons votre retour tres au serieux. Merci de nous contacter en message prive avec vos coordonnees pour un traitement prioritaire.',
+              'Merci pour votre signalement. Notre equipe va verifier cette situation immediatement et revenir vers vous rapidement avec une solution concrete.'
+            ];
+            const responses = llmSuggestions.length ? llmSuggestions : fallbackSuggestions;
+            const useFallbackResponses = llmSuggestions.length === 0;
+
             return (
               <div key={alert.id} className="bb-block">
                 <div className="bb-block-header">
@@ -100,6 +137,14 @@ export default function BadBuzz() {
                   )}
                 </div>
 
+                <div style={{ padding: '0 20px 10px', fontSize: 12, color: 'var(--text2)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <span>Priority: {Number(alert.priority_score || 0).toFixed(2)}</span>
+                  <span>Reactions: {Number(alert.reactions_count || 0)}</span>
+                  <span>Comments: {Number(alert.comments_count || 0)}</span>
+                  <span>Shares: {Number(alert.shares_count || 0)}</span>
+                  <span>Total: {Number(alert.engagement_total || 0)}</span>
+                </div>
+
                 <div className="bb-ctx">
                   {alert.post_text
                     ? alert.post_text.substring(0, 200) + (alert.post_text.length > 200 ? '...' : '')
@@ -111,61 +156,29 @@ export default function BadBuzz() {
                 </div>
 
                 <div className="bb-responses">
-                  <div className="resp-card">
-                    <div className="resp-head">
-                      <span className="strat-pill sp-esc">
-                        {alert.score < -0.8 ? 'Escalade critique' : 'Escalade recommandee'}
-                      </span>
-                      <button
-                        className="copy-btn"
-                        onClick={() =>
-                          handleCopyResponse(
-                            `[INTERNE] Alerte ${alert.sentiment}. Score: ${formatScore(alert.score)}. Source: ${alert.group_name}. Escalader immédiatement.`
-                          )
-                        }
-                      >
-                        Copier
-                      </button>
+                  {responses.map((responseText, index) => (
+                    <div className="resp-card" key={`${alert.id}-resp-${index}`}>
+                      <div className="resp-head">
+                        <span className={`strat-pill ${useFallbackResponses ? (index === 0 ? 'sp-esc' : 'sp-emp') : 'sp-emp'}`}>
+                          {useFallbackResponses
+                            ? (index === 0 ? 'Template escalation' : 'Template empathique')
+                            : `Suggestion IA ${index + 1}`}
+                        </span>
+                        <button
+                          className="copy-btn"
+                          onClick={() => handleCopyResponse(responseText)}
+                        >
+                          Copier
+                        </button>
+                      </div>
+                      <div className="resp-text">{responseText}</div>
+                      <div className="resp-why">
+                        {useFallbackResponses
+                          ? 'Template local utilise car aucune suggestion LLM n\'a ete retournee.'
+                          : 'Suggestion generee et retournee par le backend LLM.'}
+                      </div>
                     </div>
-                    <div className="resp-text">
-                      {alert.score < -0.8
-                        ? '[CRITIQUE] Contacter immédiatement la direction. Post viral détecté. Déclencher cellule de crise.'
-                        : 'Escalader au directeur des opérations. Préparer réponse publique et interne.'}
-                    </div>
-                    <div className="resp-why">
-                      {alert.score < -0.8 ? 'Post a forte viralite' : 'Sentiment tres negatif detecte'}
-                    </div>
-                  </div>
-
-                  <div className="resp-card">
-                    <div className="resp-head">
-                      <span className="strat-pill sp-emp">Reponse empathique publique</span>
-                      <button
-                        className="copy-btn"
-                        onClick={() =>
-                          handleCopyResponse(
-                            `Bonjour,\n\nNous comprenons votre frustration et prenons note de votre retour. \n\nPouvez-vous nous contacter en message privé avec plus de détails ? Notre équipe prioritaire vous aidera sous les 24 heures.\n\nCordialement,\nService Client`
-                          )
-                        }
-                      >
-                        Copier
-                      </button>
-                    </div>
-                    <div className="resp-text">
-                      Bonjour,<br />
-                      <br />
-                      Nous comprenons votre frustration et prenons note de votre retour. La satisfaction client est notre priorité.
-                      <br />
-                      <br />
-                      Pouvez-vous nous contacter en message privé avec plus de détails ? Notre équipe prioritaire vous répondra sous 24h.
-                      <br />
-                      <br />
-                      Merci de votre patience.
-                    </div>
-                    <div className="resp-why">
-                      Montre reactivite et empathie. Deplace la discussion en prive.
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </div>
             );

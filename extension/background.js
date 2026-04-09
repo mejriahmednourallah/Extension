@@ -2,7 +2,11 @@ const STORAGE_KEYS = {
   alerts: "alerts",
   unreadCount: "unread_count",
   config: "config",
-  lastScan: "last_scan"
+  lastScan: "last_scan",
+  installationId: "installation_id",
+  groups: "groups",
+  groupsSyncedAt: "groups_synced_at",
+  extensionStateSyncedAt: "extension_state_synced_at"
 };
 
 const DEFAULT_CONFIG = {
@@ -98,10 +102,14 @@ const BACKEND_PROBE_MAX_ATTEMPTS = 12;
 const BACKEND_PROBE_BASE_DELAY_MS = 1500;
 const BACKEND_PROBE_TIMEOUT_MS = 12000;
 const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
+const GROUPS_SYNC_TTL_MS = 60000;
+const EXTENSION_STATE_SYNC_TTL_MS = 60000;
 
 const analyzeQueue = [];
 let analyzeWorkerRunning = false;
 const backendHealthyUntilByUrl = new Map();
+const groupsSyncedUntilByUrl = new Map();
+const extensionStateSyncedUntilByUrl = new Map();
 
 function storageGet(keys) {
   return new Promise((resolve) => {
@@ -117,6 +125,85 @@ function storageSet(values) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function generateInstallationId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `ext-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function ensureInstallationId() {
+  const state = await storageGet([STORAGE_KEYS.installationId]);
+  const existing = String(state[STORAGE_KEYS.installationId] || "").trim();
+  if (existing) {
+    return existing;
+  }
+
+  const created = generateInstallationId();
+  await storageSet({ [STORAGE_KEYS.installationId]: created });
+  return created;
+}
+
+function normalizeGroupUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(value);
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.origin}${normalizedPath}`.toLowerCase();
+  } catch (error) {
+    return value.replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+function extractFacebookGroupId(url) {
+  const value = normalizeGroupUrl(url);
+  const match = value.match(/\/groups\/([^/?#]+)/i);
+  return match ? String(match[1]).trim().toLowerCase() : "";
+}
+
+function filterPostsByMonitoredGroups(posts, groups) {
+  const enabledGroups = Array.isArray(groups) ? groups.filter((group) => group && group.enabled !== false) : [];
+
+  if (!enabledGroups.length) {
+    // Fail-open default: before any group is configured, analyze all collected posts.
+    return Array.isArray(posts) ? posts : [];
+  }
+
+  const normalizedGroupUrls = enabledGroups
+    .map((group) => normalizeGroupUrl(group.group_url || group.url || ""))
+    .filter(Boolean);
+  const groupIds = new Set(
+    enabledGroups
+      .map((group) => extractFacebookGroupId(group.group_url || group.url || ""))
+      .filter(Boolean)
+  );
+
+  return (Array.isArray(posts) ? posts : []).filter((post) => {
+    const postGroupUrl = normalizeGroupUrl(post.group_url || "");
+    const postPostUrl = normalizeGroupUrl(post.post_url || "");
+    const postGroupId = extractFacebookGroupId(post.group_url || post.post_url || "");
+
+    if (postGroupId && groupIds.has(postGroupId)) {
+      return true;
+    }
+
+    if (postGroupUrl && normalizedGroupUrls.some((groupUrl) => postGroupUrl.startsWith(groupUrl))) {
+      return true;
+    }
+
+    if (postPostUrl && normalizedGroupUrls.some((groupUrl) => postPostUrl.includes(groupUrl))) {
+      return true;
+    }
+
+    return false;
+  });
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = BACKEND_PROBE_TIMEOUT_MS) {
@@ -240,6 +327,74 @@ async function probeBackendHealth(backendUrl, headers) {
   );
 }
 
+async function syncExtensionStateWithBackend(config, backendUrl, headers, installationId) {
+  const syncedUntil = Number(extensionStateSyncedUntilByUrl.get(backendUrl) || 0);
+  if (syncedUntil > Date.now()) {
+    return;
+  }
+
+  const payload = {
+    installation_id: installationId,
+    client_name: config.client_name || "",
+    alert_email: config.alert_email || "",
+    auto_scan: config.auto_scan !== false,
+    keywords: Array.isArray(config.keywords) ? config.keywords : []
+  };
+
+  try {
+    const response = await fetchWithTimeout(`${backendUrl}/extension/sync-state`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(`sync-state failed (${response.status}): ${message}`);
+    }
+
+    extensionStateSyncedUntilByUrl.set(backendUrl, Date.now() + EXTENSION_STATE_SYNC_TTL_MS);
+    await storageSet({ [STORAGE_KEYS.extensionStateSyncedAt]: new Date().toISOString() });
+  } catch (error) {
+    console.warn("Could not sync extension state to backend", error);
+  }
+}
+
+async function refreshGroupsFromBackend(backendUrl, headers) {
+  const syncedUntil = Number(groupsSyncedUntilByUrl.get(backendUrl) || 0);
+  if (syncedUntil > Date.now()) {
+    const cached = await storageGet([STORAGE_KEYS.groups]);
+    return Array.isArray(cached[STORAGE_KEYS.groups]) ? cached[STORAGE_KEYS.groups] : [];
+  }
+
+  try {
+    const response = await fetchWithTimeout(`${backendUrl}/groups?include_disabled=true`, {
+      method: "GET",
+      headers
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(`groups fetch failed (${response.status}): ${message}`);
+    }
+
+    const groups = await response.json();
+    const safeGroups = Array.isArray(groups) ? groups : [];
+
+    await storageSet({
+      [STORAGE_KEYS.groups]: safeGroups,
+      [STORAGE_KEYS.groupsSyncedAt]: new Date().toISOString()
+    });
+    groupsSyncedUntilByUrl.set(backendUrl, Date.now() + GROUPS_SYNC_TTL_MS);
+
+    return safeGroups;
+  } catch (error) {
+    console.warn("Could not refresh groups from backend", error);
+    const cached = await storageGet([STORAGE_KEYS.groups]);
+    return Array.isArray(cached[STORAGE_KEYS.groups]) ? cached[STORAGE_KEYS.groups] : [];
+  }
+}
+
 async function updateBadge(unreadCount) {
   const text = unreadCount > 0 ? String(unreadCount) : "";
   await chrome.action.setBadgeBackgroundColor({ color: "#e53e3e" });
@@ -248,6 +403,10 @@ async function updateBadge(unreadCount) {
 
 function buildAlertEntry(post, result) {
   const sentiment = String(result.sentiment || "neutral").toLowerCase();
+  const reactionsCount = Math.max(0, Number(post.reactions_count || 0));
+  const commentsCount = Math.max(0, Number(post.comments_count || 0));
+  const sharesCount = Math.max(0, Number(post.shares_count || 0));
+
   return {
     id: post.id,
     text: post.text,
@@ -262,6 +421,11 @@ function buildAlertEntry(post, result) {
     bad_buzz_suggestions: Array.isArray(result.bad_buzz_suggestions)
       ? result.bad_buzz_suggestions
       : [],
+    reactions_count: reactionsCount,
+    comments_count: commentsCount,
+    shares_count: sharesCount,
+    engagement_total: Math.max(0, Number(result.engagement_total || reactionsCount + commentsCount + sharesCount)),
+    priority_score: Number(result.priority_score || 0),
     timestamp: new Date().toISOString(),
     read: !NEGATIVE_SENTIMENTS.has(sentiment)
   };
@@ -285,7 +449,9 @@ async function ensureStorageDefaults() {
   const state = await storageGet([
     STORAGE_KEYS.alerts,
     STORAGE_KEYS.unreadCount,
-    STORAGE_KEYS.config
+    STORAGE_KEYS.config,
+    STORAGE_KEYS.installationId,
+    STORAGE_KEYS.groups
   ]);
 
   const updates = {};
@@ -294,6 +460,9 @@ async function ensureStorageDefaults() {
   }
   if (typeof state[STORAGE_KEYS.unreadCount] !== "number") {
     updates[STORAGE_KEYS.unreadCount] = 0;
+  }
+  if (!Array.isArray(state[STORAGE_KEYS.groups])) {
+    updates[STORAGE_KEYS.groups] = [];
   }
 
   const storedConfig = state[STORAGE_KEYS.config] || {};
@@ -348,19 +517,30 @@ async function ensureStorageDefaults() {
 
   updates[STORAGE_KEYS.config] = config;
 
+  const installationId = String(state[STORAGE_KEYS.installationId] || "").trim();
+  if (!installationId) {
+    updates[STORAGE_KEYS.installationId] = generateInstallationId();
+  }
+
   await storageSet(updates);
   await updateBadge(state[STORAGE_KEYS.unreadCount] || 0);
 }
 
 async function callAnalyzeApi(posts) {
-  const { [STORAGE_KEYS.config]: configFromStorage } = await storageGet([STORAGE_KEYS.config]);
+  const {
+    [STORAGE_KEYS.config]: configFromStorage,
+    [STORAGE_KEYS.installationId]: installationIdFromStorage
+  } = await storageGet([STORAGE_KEYS.config, STORAGE_KEYS.installationId]);
+
   const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
+  const installationId = String(installationIdFromStorage || "").trim() || (await ensureInstallationId());
 
   const payload = {
     posts,
     client_name: config.client_name || "",
     keywords: Array.isArray(config.keywords) ? config.keywords : [],
-    alert_email: config.alert_email || ""
+    alert_email: config.alert_email || "",
+    installation_id: installationId
   };
 
   const backendUrl = sanitizeBackendUrl(config.backend_url);
@@ -368,6 +548,16 @@ async function callAnalyzeApi(posts) {
 
   // Render free services can be cold; probe health with retries before analyze.
   await probeBackendHealth(backendUrl, headers);
+
+  await syncExtensionStateWithBackend(config, backendUrl, headers, installationId);
+  const monitoredGroups = await refreshGroupsFromBackend(backendUrl, headers);
+
+  const filteredPosts = filterPostsByMonitoredGroups(posts, monitoredGroups);
+  if (!filteredPosts.length) {
+    return { results: [], alerts_sent: 0 };
+  }
+
+  payload.posts = filteredPosts;
 
   const response = await fetchWithTimeout(`${backendUrl}/analyze`, {
     method: "POST",
@@ -527,7 +717,30 @@ async function saveConfig(partialConfig) {
   mergedConfig.backend_url = sanitizeBackendUrl(mergedConfig.backend_url);
 
   await storageSet({ [STORAGE_KEYS.config]: mergedConfig });
+
+  try {
+    await syncCurrentConfigToBackend();
+  } catch (error) {
+    console.warn("Config saved but backend sync failed", error);
+  }
+
   return mergedConfig;
+}
+
+async function syncCurrentConfigToBackend() {
+  const {
+    [STORAGE_KEYS.config]: configFromStorage,
+    [STORAGE_KEYS.installationId]: installationIdFromStorage
+  } = await storageGet([STORAGE_KEYS.config, STORAGE_KEYS.installationId]);
+
+  const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
+  const installationId = String(installationIdFromStorage || "").trim() || (await ensureInstallationId());
+  const backendUrl = sanitizeBackendUrl(config.backend_url);
+  const headers = buildBackendHeaders(backendUrl);
+
+  await probeBackendHealth(backendUrl, headers);
+  await syncExtensionStateWithBackend(config, backendUrl, headers, installationId);
+  await refreshGroupsFromBackend(backendUrl, headers);
 }
 
 function isFacebookGroupUrl(url) {
@@ -613,13 +826,19 @@ async function manualScanActiveTab() {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  ensureStorageDefaults().catch((error) => {
+  (async () => {
+    await ensureStorageDefaults();
+    await syncCurrentConfigToBackend();
+  })().catch((error) => {
     console.error("Failed during extension install bootstrap", error);
   });
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  ensureStorageDefaults().catch((error) => {
+  (async () => {
+    await ensureStorageDefaults();
+    await syncCurrentConfigToBackend();
+  })().catch((error) => {
     console.error("Failed during extension startup bootstrap", error);
   });
 });

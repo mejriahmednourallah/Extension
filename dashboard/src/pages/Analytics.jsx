@@ -1,16 +1,29 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { systemAPI } from '../utils/api';
 
 export default function Analytics() {
-  const weekData = [
-    { day: 'Lundi', positif: 45, neutre: 30, négatif: 15 },
-    { day: 'Mardi', positif: 52, neutre: 28, négatif: 20 },
-    { day: 'Mercredi', positif: 48, neutre: 35, négatif: 17 },
-    { day: 'Jeudi', positif: 61, neutre: 25, négatif: 14 },
-    { day: 'Vendredi', positif: 55, neutre: 32, négatif: 13 },
-    { day: 'Samedi', positif: 67, neutre: 28, négatif: 5 },
-    { day: 'Dimanche', positif: 72, neutre: 20, négatif: 8 },
-  ];
+  const [weekData, setWeekData] = useState([]);
+  const [score, setScore] = useState(0);
+
+  useEffect(() => {
+    (async () => {
+      const response = await systemAPI.stats();
+      const data = response.data || {};
+      const chart = Array.isArray(data.daily_sentiment_7d)
+        ? data.daily_sentiment_7d.map((item) => ({
+            day: String(item.day || '').slice(5),
+            positif: Number(item.positive || 0),
+            neutre: Number(item.neutral || 0),
+            negatif: Number(item.negative || 0) + Number(item.very_negative || 0),
+          }))
+        : [];
+
+      setWeekData(chart);
+      const avgScore24h = Number(data.avg_score_24h || 0);
+      setScore(Math.round(Math.max(0, Math.min(100, (avgScore24h + 1) * 50))));
+    })();
+  }, []);
 
   return (
     <div>
@@ -34,7 +47,7 @@ export default function Analytics() {
                 <Legend />
                 <Bar dataKey="positif" stackId="a" fill="#22c55e" />
                 <Bar dataKey="neutre" stackId="a" fill="#9ca3af" />
-                <Bar dataKey="négatif" stackId="a" fill="#ef4444" />
+                <Bar dataKey="negatif" stackId="a" fill="#ef4444" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -46,10 +59,10 @@ export default function Analytics() {
               <h3>Score e-réputation</h3>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '300px' }}>
-              <div style={{ fontSize: '64px', fontWeight: 700, color: '#f97316' }}>48</div>
+              <div style={{ fontSize: '64px', fontWeight: 700, color: '#f97316' }}>{score}</div>
               <div style={{ marginLeft: '20px', color: 'var(--text2)' }}>
                 <div style={{ fontSize: '12px' }}>/ 100</div>
-                <div style={{ fontSize: '11px', marginTop: '8px' }}>Moyen</div>
+                <div style={{ fontSize: '11px', marginTop: '8px' }}>{score >= 65 ? 'Bon' : score >= 40 ? 'Moyen' : 'A risque'}</div>
               </div>
             </div>
           </div>

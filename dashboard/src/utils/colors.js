@@ -4,6 +4,11 @@ export const SENTIMENT_COLORS = {
   neutre: { background: '#6b7280', color: '#ffffff', label: 'Neutre' },
   négatif: { background: '#ea580c', color: '#ffffff', label: 'Negatif' },
   très_négatif: { background: '#dc2626', color: '#ffffff', label: 'Tres negatif' },
+  very_positive: { background: '#16a34a', color: '#ffffff', label: 'Tres positif' },
+  positive: { background: '#22c55e', color: '#ffffff', label: 'Positif' },
+  neutral: { background: '#6b7280', color: '#ffffff', label: 'Neutre' },
+  negative: { background: '#ea580c', color: '#ffffff', label: 'Negatif' },
+  very_negative: { background: '#dc2626', color: '#ffffff', label: 'Tres negatif' },
 };
 
 export const CATEGORY_COLORS = {
@@ -30,7 +35,7 @@ export const THEME = {
 };
 
 export function sentimentToColor(sentiment) {
-  return SENTIMENT_COLORS[sentiment] || SENTIMENT_COLORS.neutre;
+  return SENTIMENT_COLORS[sentiment] || SENTIMENT_COLORS.neutral || SENTIMENT_COLORS.neutre;
 }
 
 export function getSentimentIcon(sentiment) {
@@ -40,6 +45,11 @@ export function getSentimentIcon(sentiment) {
     neutre: '',
     négatif: '',
     très_négatif: '',
+    very_positive: '',
+    positive: '',
+    neutral: '',
+    negative: '',
+    very_negative: '',
   };
   return icons[sentiment] || '';
 }

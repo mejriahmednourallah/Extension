@@ -23,6 +23,86 @@ function cleanText(value) {
   return normalizeWhitespace(stripEmoji(value));
 }
 
+function parseCountToken(rawValue) {
+  if (!rawValue) {
+    return 0;
+  }
+
+  const compact = String(rawValue)
+    .replace(/[\u00A0\s]/g, "")
+    .replace(/,/g, ".")
+    .trim()
+    .toLowerCase();
+
+  const match = compact.match(/^(\d+(?:\.\d+)?)([kmb])?$/i);
+  if (!match) {
+    const fallback = compact.match(/\d+/);
+    return fallback ? Number.parseInt(fallback[0], 10) : 0;
+  }
+
+  const base = Number.parseFloat(match[1]);
+  const suffix = match[2] || "";
+  const multiplier = suffix === "k" ? 1000 : suffix === "m" ? 1000000 : suffix === "b" ? 1000000000 : 1;
+
+  if (!Number.isFinite(base)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.round(base * multiplier));
+}
+
+function pickCountByPatterns(text, patterns) {
+  if (!text) {
+    return 0;
+  }
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const captured = match[1] || match[2] || "";
+    const parsed = parseCountToken(captured);
+    if (parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
+function extractEngagementCounts(article) {
+  const text = cleanText(article && (article.innerText || article.textContent || ""));
+
+  const reactions = pickCountByPatterns(text, [
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:reactions?|reaction|j['’]?aime|likes?)/i,
+    /(?:reactions?|reaction|j['’]?aime|likes?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:إعجابات|إعجاب|اعجابات|اعجاب)/i,
+    /(?:إعجابات|إعجاب|اعجابات|اعجاب)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
+  ]);
+
+  const comments = pickCountByPatterns(text, [
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:commentaires?|comments?)/i,
+    /(?:commentaires?|comments?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:تعليقات|تعليق)/i,
+    /(?:تعليقات|تعليق)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
+  ]);
+
+  const shares = pickCountByPatterns(text, [
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:partages?|shares?)/i,
+    /(?:partages?|shares?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
+    /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:مشاركات|مشاركة)/i,
+    /(?:مشاركات|مشاركة)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
+  ]);
+
+  return {
+    reactions_count: reactions,
+    comments_count: comments,
+    shares_count: shares
+  };
+}
+
 function safeBase64(value) {
   try {
     return btoa(unescape(encodeURIComponent(value)));
@@ -94,6 +174,7 @@ function extractPostFromArticle(article) {
   }
 
   const { timestamp, post_url: postUrl } = extractTimestampAndUrl(article);
+  const engagement = extractEngagementCounts(article);
 
   const post = {
     id: postId,
@@ -102,7 +183,10 @@ function extractPostFromArticle(article) {
     post_url: postUrl,
     group_name: resolveGroupName(),
     group_url: window.location.href,
-    timestamp: timestamp || new Date().toISOString()
+    timestamp: timestamp || new Date().toISOString(),
+    reactions_count: engagement.reactions_count,
+    comments_count: engagement.comments_count,
+    shares_count: engagement.shares_count
   };
 
   processedPostIds.add(postId);

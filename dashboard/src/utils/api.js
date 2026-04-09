@@ -94,25 +94,52 @@ export const alertsAPI = {
       console.error('Error fetching history:', err);
       return { data: [] };
     }),
+  getBadBuzz: (limit = 50) =>
+    apiClient.get('/badbuzz', { params: { limit } }).catch((err) => {
+      console.error('Error fetching bad buzz:', err);
+      return { data: [] };
+    }),
 };
 
 // Groups API
 export const groupsAPI = {
-  getAll: () =>
-    apiClient.get('/groups').catch((err) => {
+  getAll: (includeDisabled = true) =>
+    apiClient.get('/groups', { params: { include_disabled: includeDisabled } }).catch((err) => {
       console.error('Error fetching groups:', err);
       return { data: [] };
     }),
-  create: (data) =>
-    apiClient.post('/groups', data).catch((err) => {
+  create: (data) => {
+    const payload = {
+      name: data?.name || '',
+      group_url: data?.group_url || data?.url || '',
+      category: data?.category || 'marque',
+      enabled: data?.enabled !== false,
+      scan_interval_minutes: Number(data?.scan_interval_minutes || data?.interval || 15),
+    };
+
+    return apiClient.post('/groups', payload).catch((err) => {
       console.error('Error creating group:', err);
       throw err;
-    }),
-  update: (id, data) =>
-    apiClient.put(`/groups/${id}`, data).catch((err) => {
+    });
+  },
+  update: (id, data) => {
+    const payload = {
+      ...(data?.name !== undefined ? { name: data.name } : {}),
+      ...(data?.group_url !== undefined || data?.url !== undefined
+        ? { group_url: data.group_url || data.url }
+        : {}),
+      ...(data?.category !== undefined ? { category: data.category } : {}),
+      ...(data?.enabled !== undefined ? { enabled: Boolean(data.enabled) } : {}),
+      ...(data?.scan_interval_minutes !== undefined || data?.interval !== undefined
+        ? { scan_interval_minutes: Number(data.scan_interval_minutes || data.interval || 15) }
+        : {}),
+    };
+
+    return apiClient.put(`/groups/${id}`, payload).catch((err) => {
       console.error('Error updating group:', err);
       throw err;
-    }),
+    });
+  },
   delete: (id) =>
     apiClient.delete(`/groups/${id}`).catch((err) => {
       console.error('Error deleting group:', err);
@@ -127,15 +154,13 @@ export const keywordsAPI = {
       console.error('Error fetching keywords:', err);
       return { data: [] };
     }),
-  create: (category, keyword) =>
-    apiClient.post('/keywords', { category, keyword }).catch((err) => {
-      console.error('Error creating keyword:', err);
-      throw err;
-    }),
-  delete: (id) =>
-    apiClient.delete(`/keywords/${id}`).catch((err) => {
-      console.error('Error deleting keyword:', err);
-      throw err;
+};
+
+export const extensionAPI = {
+  getState: () =>
+    apiClient.get('/extension/state').catch((err) => {
+      console.error('Error fetching extension state:', err);
+      return { data: null };
     }),
 };
 
@@ -149,6 +174,17 @@ export const systemAPI = {
   stats: () =>
     apiClient.get('/stats').catch((err) => {
       console.error('Error fetching stats:', err);
-      return { data: {} };
+      return {
+        data: {
+          total_posts: 0,
+          total_posts_today: 0,
+          alerts_today: 0,
+          groups_active_count: 0,
+          avg_score_24h: 0,
+          sentiment_counts_24h: {},
+          daily_sentiment_7d: [],
+          last_scan_at: null,
+        },
+      };
     }),
 };
