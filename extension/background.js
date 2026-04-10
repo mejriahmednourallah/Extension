@@ -102,6 +102,8 @@ const NEGATIVE_SENTIMENTS = new Set(["negative", "very_negative"]);
 const BACKEND_PROBE_MAX_ATTEMPTS = 12;
 const BACKEND_PROBE_BASE_DELAY_MS = 1500;
 const BACKEND_PROBE_TIMEOUT_MS = 12000;
+const ANALYZE_REQUEST_TIMEOUT_MS = 35000;
+const ANALYZE_REQUEST_MAX_ATTEMPTS = 2;
 const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
 const GROUPS_SYNC_TTL_MS = 60000;
 const EXTENSION_STATE_SYNC_TTL_MS = 60000;
@@ -164,6 +166,19 @@ function storageSet(values) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatErrorDetails(error) {
+  if (!error) {
+    return "Unknown error";
+  }
+
+  const name = String(error.name || "Error");
+  const message = String(error.message || error);
+  const stack = typeof error.stack === "string" ? error.stack : "";
+  const details = `${name}: ${message}`;
+
+  return stack ? `${details}\n${stack}` : details;
 }
 
 function generateInstallationId() {
@@ -251,6 +266,18 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = BACKEND_PROBE_TIM
 
   try {
     return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    const isAbortError =
+      String(error && error.name || "").toLowerCase() === "aborterror" ||
+      /aborted|aborterror|timed out|timeout/i.test(String(error && error.message || ""));
+
+    if (isAbortError) {
+      const wrapped = new Error(`Request timed out after ${timeoutMs}ms: ${url}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -601,11 +628,33 @@ async function callAnalyzeApi(posts) {
 
   payload.posts = filteredPosts;
 
-  const response = await fetchWithTimeout(`${backendUrl}/analyze`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload)
-  });
+  let response = null;
+  let lastAnalyzeError = null;
+  for (let attempt = 1; attempt <= ANALYZE_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      response = await fetchWithTimeout(
+        `${backendUrl}/analyze`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload)
+        },
+        ANALYZE_REQUEST_TIMEOUT_MS
+      );
+      break;
+    } catch (error) {
+      lastAnalyzeError = error;
+      if (attempt < ANALYZE_REQUEST_MAX_ATTEMPTS) {
+        await wait(500 * attempt);
+      }
+    }
+  }
+
+  if (!response) {
+    throw new Error(
+      `Analyze request failed after ${ANALYZE_REQUEST_MAX_ATTEMPTS} attempt(s): ${formatErrorDetails(lastAnalyzeError)}`
+    );
+  }
 
   if (!response.ok) {
     const message = await response.text();
@@ -700,7 +749,7 @@ async function processAnalyzeQueue() {
       try {
         await handleAnalyzePosts(posts);
       } catch (error) {
-        console.error("analyze_posts processing failed", error);
+        console.error("analyze_posts processing failed", formatErrorDetails(error));
       }
     }
   } finally {
