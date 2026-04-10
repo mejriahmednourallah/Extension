@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import google.generativeai as genai
+import httpx
 from groq import (
     APIConnectionError,
     APIError,
@@ -49,7 +50,13 @@ _GROQ_FALLBACK_EXCEPTIONS = (
     BadRequestError,
 )
 
-_PROVIDER_SEQUENCE = ("gemini", "groq")
+_CEREBRAS_FALLBACK_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.TransportError,
+    httpx.HTTPStatusError,
+)
+
+_PROVIDER_SEQUENCE = ("cerebras", "gemini", "groq")
 
 
 def build_prompt(post_text: str, client_name: str, keywords: list[str]) -> str:
@@ -69,7 +76,7 @@ Instructions critiques:
 - N'ajoute aucun markdown, aucun commentaire, aucun texte hors JSON.
 - Si le post est ambigu, choisis "neutral" avec score proche de 0.
 - "keywords_matched" contient uniquement des mots-cles effectivement presents dans le post.
-- "bad_buzz_suggestions" contient 3 actions courtes, concretes, orientee CM.
+- "bad_buzz_suggestions" contient exactement 3 messages prets pour envoi en masse (bulk send), chacun prefixe par [PUBLIC], [PRIVE], ou [INTERNE].
 
 Schema de sortie strict:
 {{
@@ -78,9 +85,9 @@ Schema de sortie strict:
   "category": "service_complaint|fraud_accusation|general_negative|product_complaint|other",
   "keywords_matched": [<liste des mots-cles du client trouves>],
   "bad_buzz_suggestions": [
-    "<Strategie 1: reponse empathique publique>",
-    "<Strategie 2: escalade interne + contact direct>",
-    "<Strategie 3: post de clarification ou contre-narration>"
+        "[PUBLIC] <Message empathique court pret a publier>",
+        "[PRIVE] <Message DM pour collecte d'infos et resolution>",
+        "[INTERNE] <Consigne operationnelle pour equipe support/risk>"
   ]
 }}
 
@@ -188,14 +195,14 @@ def _build_key_pool(primary_key: str, extra_keys: tuple[str, ...]) -> list[str]:
     return list(dict.fromkeys(filtered))
 
 
-async def call_groq(prompt: str, api_key: str) -> str:
+async def call_groq(prompt: str, api_key: str, model: str) -> str:
     if not api_key:
         raise RuntimeError("Missing GROQ_API_KEY")
 
     # Disable Groq SDK automatic retries so provider fallback is handled by our own logic.
     client = AsyncGroq(api_key=api_key, max_retries=0)
     response = await client.chat.completions.create(
-        model=settings.groq_model,
+        model=model,
         messages=[
             {"role": "system", "content": "Return only one JSON object and nothing else."},
             {"role": "user", "content": prompt},
@@ -210,12 +217,12 @@ async def call_groq(prompt: str, api_key: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def _call_gemini_sync(prompt: str, api_key: str) -> str:
+def _call_gemini_sync(prompt: str, api_key: str, model: str) -> str:
     if not api_key:
         raise RuntimeError("Missing GEMINI_API_KEY")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(settings.gemini_model)
+    model_obj = genai.GenerativeModel(model)
     generation_config = {
         "temperature": 0.1,
         "max_output_tokens": 400,
@@ -223,10 +230,10 @@ def _call_gemini_sync(prompt: str, api_key: str) -> str:
     }
 
     try:
-        response = model.generate_content(prompt, generation_config=generation_config)
+        response = model_obj.generate_content(prompt, generation_config=generation_config)
     except Exception:
         generation_config.pop("response_mime_type", None)
-        response = model.generate_content(prompt, generation_config=generation_config)
+        response = model_obj.generate_content(prompt, generation_config=generation_config)
 
     if hasattr(response, "text") and response.text:
         return response.text
@@ -245,72 +252,233 @@ def _call_gemini_sync(prompt: str, api_key: str) -> str:
     return "\n".join(candidate_text_parts)
 
 
-async def call_gemini(prompt: str, api_key: str) -> str:
-    return await asyncio.to_thread(_call_gemini_sync, prompt, api_key)
+async def call_gemini(prompt: str, api_key: str, model: str) -> str:
+    return await asyncio.to_thread(_call_gemini_sync, prompt, api_key, model)
 
 
-async def _call_groq_with_key_rotation(prompt: str, keys: list[str]) -> str:
+async def call_cerebras(prompt: str, api_key: str, model: str) -> str:
+    if not api_key:
+        raise RuntimeError("Missing CEREBRAS_API_KEY")
+
+    base_url = str(settings.cerebras_base_url or "https://api.cerebras.ai/v1").rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    base_payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return only one JSON object and nothing else."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 500,
+    }
+
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        payload = {**base_payload, "response_format": {"type": "json_object"}}
+        response = await client.post(endpoint, headers=headers, json=payload)
+
+        if response.status_code == 400 and "response_format" in response.text.lower():
+            response = await client.post(endpoint, headers=headers, json=base_payload)
+
+        response.raise_for_status()
+        body = response.json()
+
+    choices = body.get("choices") or []
+    if not choices:
+        return ""
+
+    content = (choices[0] or {}).get("message", {}).get("content", "")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
+
+    return str(content or "")
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitError):
+        return True
+    msg = str(exc).lower()
+    return "429" in msg or "rate limit" in msg or "quota" in msg or "too many requests" in msg
+
+
+async def _call_groq_with_key_rotation(prompt: str, keys: list[str], model: str) -> str:
     if not keys:
         raise RuntimeError("Missing GROQ_API_KEY")
 
     last_error: Exception | None = None
     for index, key in enumerate(keys, start=1):
         try:
-            return await call_groq(prompt, key)
+            return await call_groq(prompt, key, model)
         except _GROQ_FALLBACK_EXCEPTIONS as exc:
             last_error = exc
             if index < len(keys):
                 logger.warning(
-                    "Groq key %s/%s failed (%s). Trying next Groq key.",
-                    index,
-                    len(keys),
-                    exc,
+                    "Groq key %s/%s model=%s failed (%s). Trying next Groq key.",
+                    index, len(keys), model, exc,
                 )
             else:
-                logger.warning("Groq key %s/%s failed (%s).", index, len(keys), exc)
+                logger.warning("Groq key %s/%s model=%s failed (%s).", index, len(keys), model, exc)
         except Exception as exc:
             last_error = exc
             if index < len(keys):
                 logger.warning(
-                    "Groq key %s/%s error (%s). Trying next Groq key.",
-                    index,
-                    len(keys),
-                    exc,
+                    "Groq key %s/%s model=%s error (%s). Trying next Groq key.",
+                    index, len(keys), model, exc,
                 )
             else:
-                logger.warning("Groq key %s/%s error (%s).", index, len(keys), exc)
+                logger.warning("Groq key %s/%s model=%s error (%s).", index, len(keys), model, exc)
 
-    raise last_error or RuntimeError("Groq failed with all configured keys")
+    raise last_error or RuntimeError(f"Groq failed with all configured keys for model={model}")
 
 
-async def _call_gemini_with_key_rotation(prompt: str, keys: list[str]) -> str:
+async def _call_gemini_with_key_rotation(prompt: str, keys: list[str], model: str) -> str:
     if not keys:
         raise RuntimeError("Missing GEMINI_API_KEY")
 
     last_error: Exception | None = None
     for index, key in enumerate(keys, start=1):
         try:
-            return await call_gemini(prompt, key)
+            return await call_gemini(prompt, key, model)
         except Exception as exc:
             last_error = exc
             if index < len(keys):
                 logger.warning(
-                    "Gemini key %s/%s failed (%s). Trying next Gemini key.",
-                    index,
-                    len(keys),
-                    exc,
+                    "Gemini key %s/%s model=%s failed (%s). Trying next Gemini key.",
+                    index, len(keys), model, exc,
                 )
             else:
-                logger.warning("Gemini key %s/%s failed (%s).", index, len(keys), exc)
+                logger.warning("Gemini key %s/%s model=%s failed (%s).", index, len(keys), model, exc)
 
-    raise last_error or RuntimeError("Gemini failed with all configured keys")
+    raise last_error or RuntimeError(f"Gemini failed with all configured keys for model={model}")
 
 
-async def _analyze_with_provider(provider: str, prompt: str, keys: list[str]) -> dict[str, Any]:
-    if provider == "groq":
-        raw_result = await _call_groq_with_key_rotation(prompt, keys)
+async def _call_cerebras_with_key_rotation(prompt: str, keys: list[str], model: str) -> str:
+    if not keys:
+        raise RuntimeError("Missing CEREBRAS_API_KEY")
+
+    last_error: Exception | None = None
+    for index, key in enumerate(keys, start=1):
+        try:
+            return await call_cerebras(prompt, key, model)
+        except _CEREBRAS_FALLBACK_EXCEPTIONS as exc:
+            last_error = exc
+            if index < len(keys):
+                logger.warning(
+                    "Cerebras key %s/%s model=%s failed (%s). Trying next Cerebras key.",
+                    index, len(keys), model, exc,
+                )
+            else:
+                logger.warning("Cerebras key %s/%s model=%s failed (%s).", index, len(keys), model, exc)
+        except Exception as exc:
+            last_error = exc
+            if index < len(keys):
+                logger.warning(
+                    "Cerebras key %s/%s model=%s error (%s). Trying next Cerebras key.",
+                    index, len(keys), model, exc,
+                )
+            else:
+                logger.warning("Cerebras key %s/%s model=%s error (%s).", index, len(keys), model, exc)
+
+    raise last_error or RuntimeError(f"Cerebras failed with all configured keys for model={model}")
+
+
+async def _call_groq_with_model_rotation(prompt: str, keys: list[str], models: list[str]) -> str:
+    if not models:
+        raise RuntimeError("No Groq models configured")
+
+    last_error: Exception | None = None
+    for index, model in enumerate(models, start=1):
+        try:
+            return await _call_groq_with_key_rotation(prompt, keys, model)
+        except Exception as exc:
+            last_error = exc
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "Groq model %s/%s (%s) rate-limited. %s",
+                    index, len(models), model,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+            else:
+                logger.warning(
+                    "Groq model %s/%s (%s) failed (%s). %s",
+                    index, len(models), model, exc,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+
+    raise last_error or RuntimeError("Groq failed with all configured models and keys")
+
+
+async def _call_gemini_with_model_rotation(prompt: str, keys: list[str], models: list[str]) -> str:
+    if not models:
+        raise RuntimeError("No Gemini models configured")
+
+    last_error: Exception | None = None
+    for index, model in enumerate(models, start=1):
+        try:
+            return await _call_gemini_with_key_rotation(prompt, keys, model)
+        except Exception as exc:
+            last_error = exc
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "Gemini model %s/%s (%s) rate-limited. %s",
+                    index, len(models), model,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+            else:
+                logger.warning(
+                    "Gemini model %s/%s (%s) failed (%s). %s",
+                    index, len(models), model, exc,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+
+    raise last_error or RuntimeError("Gemini failed with all configured models and keys")
+
+
+async def _call_cerebras_with_model_rotation(prompt: str, keys: list[str], models: list[str]) -> str:
+    if not models:
+        raise RuntimeError("No Cerebras models configured")
+
+    last_error: Exception | None = None
+    for index, model in enumerate(models, start=1):
+        try:
+            return await _call_cerebras_with_key_rotation(prompt, keys, model)
+        except Exception as exc:
+            last_error = exc
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "Cerebras model %s/%s (%s) rate-limited. %s",
+                    index, len(models), model,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+            else:
+                logger.warning(
+                    "Cerebras model %s/%s (%s) failed (%s). %s",
+                    index, len(models), model, exc,
+                    "Trying next model." if index < len(models) else "No more models.",
+                )
+
+    raise last_error or RuntimeError("Cerebras failed with all configured models and keys")
+
+
+async def _analyze_with_provider(
+    provider: str, prompt: str, keys: list[str], models: list[str]
+) -> dict[str, Any]:
+    if provider == "cerebras":
+        raw_result = await _call_cerebras_with_model_rotation(prompt, keys, models)
+    elif provider == "groq":
+        raw_result = await _call_groq_with_model_rotation(prompt, keys, models)
     elif provider == "gemini":
-        raw_result = await _call_gemini_with_key_rotation(prompt, keys)
+        raw_result = await _call_gemini_with_model_rotation(prompt, keys, models)
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -326,29 +494,45 @@ async def analyze_post(post_text: str, client_name: str, keywords: list[str]) ->
 
     groq_keys = _build_key_pool(settings.groq_api_key, settings.groq_api_keys)
     gemini_keys = _build_key_pool(settings.gemini_api_key, settings.gemini_api_keys)
+    cerebras_keys = _build_key_pool(settings.cerebras_api_key, settings.cerebras_api_keys)
+    groq_models = list(settings.groq_models)
+    gemini_models = list(settings.gemini_models)
+    cerebras_models = list(settings.cerebras_models)
     provider_order = _PROVIDER_SEQUENCE
+
+    provider_keys = {
+        "cerebras": cerebras_keys,
+        "gemini": gemini_keys,
+        "groq": groq_keys,
+    }
+    provider_models = {
+        "cerebras": cerebras_models,
+        "gemini": gemini_models,
+        "groq": groq_models,
+    }
 
     provider_errors: dict[str, Exception] = {}
 
     for provider in provider_order:
-        keys = groq_keys if provider == "groq" else gemini_keys
+        keys = provider_keys.get(provider, [])
+        models = provider_models.get(provider, [])
         if not keys:
             provider_errors[provider] = RuntimeError(f"No {provider} API keys configured")
             logger.warning("Skipping %s because no API key is configured.", provider.capitalize())
             continue
 
         try:
-            parsed = await _analyze_with_provider(provider, prompt, keys)
+            parsed = await _analyze_with_provider(provider, prompt, keys, models)
             break
         except Exception as exc:
             provider_errors[provider] = exc
-            other = "Gemini" if provider == "groq" else "Groq"
-            logger.warning("%s failed (%s). Trying %s.", provider.capitalize(), exc, other)
+            logger.warning("%s failed (%s). Trying next provider.", provider.capitalize(), exc)
     else:
         logger.error(
-            "Both LLM providers failed. Groq error: %s | Gemini error: %s",
-            provider_errors.get("groq"),
+            "All LLM providers failed. Cerebras error: %s | Gemini error: %s | Groq error: %s",
+            provider_errors.get("cerebras"),
             provider_errors.get("gemini"),
+            provider_errors.get("groq"),
         )
         parsed = dict(_NEUTRAL_DEFAULT)
 
