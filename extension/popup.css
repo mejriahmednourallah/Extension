@@ -585,6 +585,121 @@ details[open] > summary::before {
   cursor: default;
 }
 
+/* ── Keywords tab ── */
+.keywords-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.keywords-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.keywords-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.keywords-content::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.keyword-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px auto;
+  gap: 8px;
+}
+
+.keyword-add-row input,
+.keyword-add-row select,
+.keyword-gate-grid input,
+.keywords-row select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.keywords-hint {
+  color: var(--ink-4);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.keywords-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.keywords-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.keywords-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.keywords-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.keywords-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  padding: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.keyword-term {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.keyword-remove-button {
+  color: var(--red);
+}
+
+.keywords-empty {
+  color: var(--ink-4);
+  font-size: 11px;
+}
+
+.keyword-gate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.keyword-gate-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* ── Stats tab ── */
 .stats-content {
   flex: 1;

@@ -1,6 +1,6 @@
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Post(BaseModel):
@@ -14,6 +14,11 @@ class Post(BaseModel):
     reactions_count: int = 0
     comments_count: int = 0
     shares_count: int = 0
+    keywords_matched_local: List[str] = Field(default_factory=list)
+    keyword_gate_passed: bool = True
+    keyword_gate_anchor_hits: int = 0
+    keyword_gate_strong_hits: int = 0
+    keyword_gate_weak_hits: int = 0
 
 
 class AnalyzeRequest(BaseModel):

@@ -19,6 +19,7 @@
       <nav class="tabs" aria-label="Popup tabs">
         <button class="tab-button active" data-tab="alerts" type="button">Alertes</button>
         <button class="tab-button" data-tab="config" type="button">Config</button>
+        <button class="tab-button" data-tab="keywords" type="button">Keywords</button>
         <button class="tab-button" data-tab="stats" type="button">Stats</button>
       </nav>
 
@@ -48,11 +49,6 @@
           <label>
             Client name
             <input id="clientNameInput" name="client_name" type="text" placeholder="Banque XYZ" />
-          </label>
-
-          <label>
-            Keywords (one per line)
-            <textarea id="keywordsInput" name="keywords" rows="5" placeholder="banque xyz&#10;xyz bank&#10;carte xyz"></textarea>
           </label>
 
           <label>
@@ -88,6 +84,48 @@
 
           <button id="saveConfigButton" class="primary-button" type="submit">Save</button>
         </form>
+      </section>
+
+      <section id="tab-keywords" class="tab-panel">
+        <div class="keywords-content">
+          <div class="keyword-add-row">
+            <input id="keywordNewInput" type="text" placeholder="Ajouter un mot-cle" />
+            <select id="keywordNewTier">
+              <option value="anchor">Brand</option>
+              <option value="strong">Strong generic</option>
+              <option value="weak">Weak generic</option>
+            </select>
+            <button id="keywordAddButton" class="secondary-button" type="button">Ajouter</button>
+          </div>
+
+          <p class="keywords-hint">
+            Choisissez le type: Brand (client direct), Strong generic (contexte metier fort), Weak generic (mot large).
+          </p>
+
+          <div id="keywordsList" class="keywords-list"></div>
+          <p id="keywordsEmpty" class="keywords-empty hidden">Aucun mot-cle configure.</p>
+
+          <div class="keyword-gate-grid">
+            <label>
+              Min Brand hits
+              <input id="gateMinAnchorInput" type="number" min="1" max="5" step="1" />
+            </label>
+            <label>
+              Min Strong hits
+              <input id="gateMinStrongInput" type="number" min="1" max="5" step="1" />
+            </label>
+            <label>
+              Combo Strong
+              <input id="gateMinComboStrongInput" type="number" min="1" max="5" step="1" />
+            </label>
+            <label>
+              Combo Weak
+              <input id="gateMinComboWeakInput" type="number" min="1" max="5" step="1" />
+            </label>
+          </div>
+
+          <button id="saveKeywordsButton" class="primary-button" type="button">Save keywords</button>
+        </div>
       </section>
 
       <section id="tab-stats" class="tab-panel">

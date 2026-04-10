@@ -8,6 +8,48 @@ globalThis.__ereputationWatcherContentLoaded = true;
 const MIN_POST_LENGTH = 20;
 const SEND_INTERVAL_MS = 3000;
 
+const DEFAULT_KEYWORD_GATE = {
+  min_anchor_hits: 1,
+  min_strong_generic_hits: 2,
+  min_combo_strong_hits: 1,
+  min_combo_weak_hits: 1
+};
+
+const WEAK_GENERIC_KEYWORDS = new Set(
+  [
+    "banque",
+    "bank",
+    "بنك",
+    "البنك",
+    "بنوك",
+    "مصرف",
+    "المصرف",
+    "atm",
+    "rib",
+    "iban",
+    "قرض"
+  ].map((item) => item.toLowerCase())
+);
+
+const CLIENT_NAME_STOPWORDS = new Set(
+  ["banque", "bank", "the", "de", "la", "le", "du", "des", "el", "al"]
+);
+
+const BRAND_SPECIFIC_KEYWORDS = new Set(
+  [
+    "biat",
+    "banque biat",
+    "biat bank",
+    "carte biat",
+    "compte biat",
+    "credit biat",
+    "agence biat",
+    "application biat",
+    "بيات",
+    "بنك بيات"
+  ].map((item) => item.toLowerCase())
+);
+
 const processedPostIds = new Set();
 const queuedPostsById = new Map();
 
@@ -15,6 +57,12 @@ let observer = null;
 let autoScanEnabled = true;
 let sendTimer = null;
 let lastSentAt = 0;
+let runtimeDetectionConfig = {
+  client_name: "",
+  keywords: [],
+  keyword_tiers: {},
+  keyword_gate: { ...DEFAULT_KEYWORD_GATE }
+};
 
 const AUTO_SCROLL_DEFAULTS = {
   interval_ms: 1300,
@@ -48,6 +96,185 @@ function stripEmoji(value) {
 
 function cleanText(value) {
   return normalizeWhitespace(stripEmoji(value));
+}
+
+function normalizeKeywordText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\u00A0\s]+/g, " ")
+    .trim();
+}
+
+function uniqueItems(items) {
+  return Array.from(new Set((items || []).filter(Boolean)));
+}
+
+function normalizeTierLabel(value) {
+  const normalized = normalizeKeywordText(value);
+  if (normalized === "brand" || normalized === "anchor") {
+    return "anchor";
+  }
+  if (normalized === "strong" || normalized === "strong_generic" || normalized === "domain") {
+    return "strong";
+  }
+  if (normalized === "weak" || normalized === "weak_generic" || normalized === "generic") {
+    return "weak";
+  }
+  return "";
+}
+
+function normalizeKeywordTiersMap(value) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const out = {};
+  for (const [rawKey, rawTier] of Object.entries(value)) {
+    const key = normalizeKeywordText(rawKey);
+    const tier = normalizeTierLabel(rawTier);
+    if (!key || !tier) {
+      continue;
+    }
+    out[key] = tier;
+  }
+
+  return out;
+}
+
+function buildClientAnchorHints(clientName) {
+  const normalized = normalizeKeywordText(clientName);
+  if (!normalized) {
+    return [];
+  }
+
+  const tokens = normalized
+    .split(" ")
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3 && !CLIENT_NAME_STOPWORDS.has(item));
+
+  return uniqueItems([normalized, ...tokens]);
+}
+
+function classifyKeywordTier(keyword, clientAnchorHints, keywordTiers) {
+  const normalized = normalizeKeywordText(keyword);
+  if (!normalized) {
+    return null;
+  }
+
+  const explicitTier = normalizeTierLabel(keywordTiers && keywordTiers[normalized]);
+  if (explicitTier) {
+    return explicitTier;
+  }
+
+  if (BRAND_SPECIFIC_KEYWORDS.has(normalized)) {
+    return "anchor";
+  }
+
+  const matchesClientAnchor = clientAnchorHints.some((hint) => {
+    if (!hint) {
+      return false;
+    }
+    return (
+      normalized === hint ||
+      normalized.startsWith(`${hint} `) ||
+      normalized.endsWith(` ${hint}`) ||
+      normalized.includes(` ${hint} `)
+    );
+  });
+
+  if (matchesClientAnchor) {
+    return "anchor";
+  }
+
+  const wordCount = normalized.split(" ").filter(Boolean).length;
+  if (WEAK_GENERIC_KEYWORDS.has(normalized) || wordCount <= 1) {
+    return "weak";
+  }
+
+  return "strong";
+}
+
+function evaluateKeywordGate(text, config) {
+  const source = config && typeof config === "object" ? config : {};
+  const normalizedKeywordTiers = normalizeKeywordTiersMap(source.keyword_tiers);
+  const keywordGate = {
+    ...DEFAULT_KEYWORD_GATE,
+    ...(source.keyword_gate && typeof source.keyword_gate === "object" ? source.keyword_gate : {})
+  };
+
+  const normalizedText = normalizeKeywordText(text);
+  const anchorHints = buildClientAnchorHints(source.client_name || "");
+  const normalizedKeywords = uniqueItems([
+    ...(Array.isArray(source.keywords) ? source.keywords.map((item) => normalizeKeywordText(item)) : []),
+    ...Object.keys(normalizedKeywordTiers),
+    ...anchorHints,
+  ]);
+
+  if (!normalizedText || !normalizedKeywords.length) {
+    return {
+      pass: true,
+      anchor_hits: 0,
+      strong_generic_hits: 0,
+      weak_generic_hits: 0,
+      matched_keywords: []
+    };
+  }
+
+  const anchorMatches = [];
+  const strongMatches = [];
+  const weakMatches = [];
+
+  for (const keyword of normalizedKeywords) {
+    if (!keyword || !normalizedText.includes(keyword)) {
+      continue;
+    }
+
+    const tier = classifyKeywordTier(keyword, anchorHints, normalizedKeywordTiers);
+    if (tier === "anchor") {
+      anchorMatches.push(keyword);
+      continue;
+    }
+    if (tier === "strong") {
+      strongMatches.push(keyword);
+      continue;
+    }
+    weakMatches.push(keyword);
+  }
+
+  const anchorHits = uniqueItems(anchorMatches).length;
+  const strongHits = uniqueItems(strongMatches).length;
+  const weakHits = uniqueItems(weakMatches).length;
+
+  const pass =
+    anchorHits >= Math.max(1, Number(keywordGate.min_anchor_hits || 1)) ||
+    strongHits >= Math.max(1, Number(keywordGate.min_strong_generic_hits || 2)) ||
+    (
+      strongHits >= Math.max(1, Number(keywordGate.min_combo_strong_hits || 1)) &&
+      weakHits >= Math.max(1, Number(keywordGate.min_combo_weak_hits || 1))
+    );
+
+  return {
+    pass,
+    anchor_hits: anchorHits,
+    strong_generic_hits: strongHits,
+    weak_generic_hits: weakHits,
+    matched_keywords: uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches])
+  };
+}
+
+function updateRuntimeDetectionConfig(config) {
+  const source = config && typeof config === "object" ? config : {};
+  runtimeDetectionConfig = {
+    client_name: String(source.client_name || "").trim(),
+    keywords: Array.isArray(source.keywords)
+      ? source.keywords.map((item) => String(item || "").trim()).filter(Boolean)
+      : [],
+    keyword_tiers: normalizeKeywordTiersMap(source.keyword_tiers),
+    keyword_gate: {
+      ...DEFAULT_KEYWORD_GATE,
+      ...(source.keyword_gate && typeof source.keyword_gate === "object" ? source.keyword_gate : {})
+    }
+  };
 }
 
 function parseCountToken(rawValue) {
@@ -195,6 +422,11 @@ function extractPostFromArticle(article) {
     return null;
   }
 
+  const keywordGate = evaluateKeywordGate(text, runtimeDetectionConfig);
+  if (!keywordGate.pass) {
+    return null;
+  }
+
   const postId = buildPostId(text);
   if (!postId || processedPostIds.has(postId)) {
     return null;
@@ -213,7 +445,12 @@ function extractPostFromArticle(article) {
     timestamp: timestamp || new Date().toISOString(),
     reactions_count: engagement.reactions_count,
     comments_count: engagement.comments_count,
-    shares_count: engagement.shares_count
+    shares_count: engagement.shares_count,
+    keywords_matched_local: keywordGate.matched_keywords,
+    keyword_gate_passed: true,
+    keyword_gate_anchor_hits: keywordGate.anchor_hits,
+    keyword_gate_strong_hits: keywordGate.strong_generic_hits,
+    keyword_gate_weak_hits: keywordGate.weak_generic_hits
   };
 
   processedPostIds.add(postId);
@@ -532,6 +769,7 @@ function applyAutoScan(enabled) {
 function loadAutoScanSetting() {
   chrome.storage.local.get(["config"], (data) => {
     const config = data.config || {};
+    updateRuntimeDetectionConfig(config);
     applyAutoScan(config.auto_scan !== false);
   });
 }
@@ -542,6 +780,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 
   const newConfig = changes.config.newValue || {};
+  updateRuntimeDetectionConfig(newConfig);
   applyAutoScan(newConfig.auto_scan !== false);
 });
 

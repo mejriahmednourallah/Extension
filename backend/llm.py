@@ -75,6 +75,9 @@ Instructions critiques:
 - Retourne UNIQUEMENT un objet JSON valide.
 - N'ajoute aucun markdown, aucun commentaire, aucun texte hors JSON.
 - Si le post est ambigu, choisis "neutral" avec score proche de 0.
+- REGLE DE PERTINENCE: classe "negative" ou "very_negative" UNIQUEMENT si la plainte/probleme vise directement le client surveille.
+- Si le texte est negatif mais parle des banques en general, d'un autre etablissement, ou d'un contexte hors client surveille, retourne "neutral".
+- REGLE DE MOTS-CLES: si aucun mot-cle fourni n'est explicitement present dans le post, retourne "neutral", score 0.0 et "keywords_matched": [].
 - "keywords_matched" contient uniquement des mots-cles effectivement presents dans le post.
 - "bad_buzz_suggestions" contient exactement 3 messages prets pour envoi en masse (bulk send), chacun prefixe par [PUBLIC], [PRIVE], ou [INTERNE].
 

@@ -45,6 +45,13 @@ const DEFAULT_CONFIG = {
   ],
   alert_email: "client@banque.tn",
   auto_scan: true,
+  keyword_tiers: {},
+  keyword_gate: {
+    min_anchor_hits: 1,
+    min_strong_generic_hits: 2,
+    min_combo_strong_hits: 1,
+    min_combo_weak_hits: 1
+  },
   backend_url: "http://localhost:8000",
   groq_api_key: "",
   gemini_api_key: ""
@@ -96,6 +103,35 @@ const BRAND_SPECIFIC_KEYWORDS = new Set(
     "بيات",
     "بنك بيات"
   ].map((item) => item.toLowerCase())
+);
+
+const LEGACY_PLACEHOLDER_KEYWORDS = new Set(
+  [
+    "banque xyz",
+    "xyz bank",
+    "carte xyz",
+    "xyz"
+  ].map((item) => item.toLowerCase())
+);
+
+const WEAK_GENERIC_KEYWORDS = new Set(
+  [
+    "banque",
+    "bank",
+    "بنك",
+    "البنك",
+    "بنوك",
+    "مصرف",
+    "المصرف",
+    "atm",
+    "rib",
+    "iban",
+    "قرض"
+  ].map((item) => item.toLowerCase())
+);
+
+const CLIENT_NAME_STOPWORDS = new Set(
+  ["banque", "bank", "the", "de", "la", "le", "du", "des", "el", "al"]
 );
 
 const NEGATIVE_SENTIMENTS = new Set(["negative", "very_negative"]);
@@ -258,6 +294,174 @@ function filterPostsByMonitoredGroups(posts, groups) {
 
     return false;
   });
+}
+
+function normalizeKeywordText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\u00A0\s]+/g, " ")
+    .trim();
+}
+
+function uniqueItems(items) {
+  return Array.from(new Set(items.filter(Boolean)));
+}
+
+function normalizeTierLabel(value) {
+  const normalized = normalizeKeywordText(value);
+  if (normalized === "brand" || normalized === "anchor") {
+    return "anchor";
+  }
+  if (normalized === "strong" || normalized === "strong_generic" || normalized === "domain") {
+    return "strong";
+  }
+  if (normalized === "weak" || normalized === "weak_generic" || normalized === "generic") {
+    return "weak";
+  }
+  return "";
+}
+
+function normalizeKeywordTiersMap(value) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const out = {};
+  for (const [rawKey, rawTier] of Object.entries(value)) {
+    const key = normalizeKeywordText(rawKey);
+    const tier = normalizeTierLabel(rawTier);
+    if (!key || !tier) {
+      continue;
+    }
+    out[key] = tier;
+  }
+
+  return out;
+}
+
+function buildClientAnchorHints(clientName) {
+  const normalized = normalizeKeywordText(clientName);
+  if (!normalized) {
+    return [];
+  }
+
+  const tokens = normalized
+    .split(" ")
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3 && !CLIENT_NAME_STOPWORDS.has(item));
+
+  return uniqueItems([normalized, ...tokens]);
+}
+
+function classifyKeywordTier(keyword, clientAnchorHints, keywordTiers) {
+  const normalized = normalizeKeywordText(keyword);
+  if (!normalized) {
+    return null;
+  }
+
+  const explicitTier = normalizeTierLabel(keywordTiers && keywordTiers[normalized]);
+  if (explicitTier) {
+    return explicitTier;
+  }
+
+  if (BRAND_SPECIFIC_KEYWORDS.has(normalized)) {
+    return "anchor";
+  }
+
+  const matchesClientAnchor = clientAnchorHints.some((hint) => {
+    if (!hint) {
+      return false;
+    }
+    return (
+      normalized === hint ||
+      normalized.startsWith(`${hint} `) ||
+      normalized.endsWith(` ${hint}`) ||
+      normalized.includes(` ${hint} `)
+    );
+  });
+
+  if (matchesClientAnchor) {
+    return "anchor";
+  }
+
+  const wordCount = normalized.split(" ").filter(Boolean).length;
+  if (WEAK_GENERIC_KEYWORDS.has(normalized) || wordCount <= 1) {
+    return "weak";
+  }
+
+  return "strong";
+}
+
+function evaluateKeywordGate(text, keywords, clientName, gateConfig, keywordTiers) {
+  const normalizedText = normalizeKeywordText(text);
+  const safeKeywords = Array.isArray(keywords) ? keywords : [];
+  const anchorHints = buildClientAnchorHints(clientName);
+  const normalizedKeywordTiers = normalizeKeywordTiersMap(keywordTiers);
+
+  const normalizedKeywords = uniqueItems([
+    ...safeKeywords.map((item) => normalizeKeywordText(item)),
+    ...Object.keys(normalizedKeywordTiers),
+    ...anchorHints,
+  ]);
+
+  if (!normalizedText || !normalizedKeywords.length) {
+    return {
+      pass: true,
+      anchor_hits: 0,
+      strong_generic_hits: 0,
+      weak_generic_hits: 0,
+      matched_keywords: [],
+    };
+  }
+
+  const anchorMatches = [];
+  const strongMatches = [];
+  const weakMatches = [];
+
+  for (const keyword of normalizedKeywords) {
+    if (!keyword || !normalizedText.includes(keyword)) {
+      continue;
+    }
+
+    const tier = classifyKeywordTier(keyword, anchorHints, normalizedKeywordTiers);
+    if (tier === "anchor") {
+      anchorMatches.push(keyword);
+      continue;
+    }
+    if (tier === "strong") {
+      strongMatches.push(keyword);
+      continue;
+    }
+    weakMatches.push(keyword);
+  }
+
+  const cfg = {
+    min_anchor_hits: 1,
+    min_strong_generic_hits: 2,
+    min_combo_strong_hits: 1,
+    min_combo_weak_hits: 1,
+    ...(gateConfig && typeof gateConfig === "object" ? gateConfig : {})
+  };
+
+  const anchorHits = uniqueItems(anchorMatches).length;
+  const strongHits = uniqueItems(strongMatches).length;
+  const weakHits = uniqueItems(weakMatches).length;
+
+  const pass =
+    anchorHits >= Math.max(1, Number(cfg.min_anchor_hits || 1)) ||
+    strongHits >= Math.max(1, Number(cfg.min_strong_generic_hits || 2)) ||
+    (
+      strongHits >= Math.max(1, Number(cfg.min_combo_strong_hits || 1)) &&
+      weakHits >= Math.max(1, Number(cfg.min_combo_weak_hits || 1))
+    );
+
+  return {
+    pass,
+    anchor_hits: anchorHits,
+    strong_generic_hits: strongHits,
+    weak_generic_hits: weakHits,
+    matched_keywords: uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches]),
+  };
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = BACKEND_PROBE_TIMEOUT_MS) {
@@ -552,7 +756,7 @@ async function ensureStorageDefaults() {
     });
 
     const cleanedKeywords = normalizedKeywords.filter(
-      (item) => !BRAND_SPECIFIC_KEYWORDS.has(item.toLowerCase())
+      (item) => !LEGACY_PLACEHOLDER_KEYWORDS.has(item.toLowerCase())
     );
 
     if (looksLegacyOnly) {
@@ -583,6 +787,11 @@ async function ensureStorageDefaults() {
   if (!String(config.gemini_api_key || "").trim()) {
     config.gemini_api_key = DEFAULT_CONFIG.gemini_api_key;
   }
+  config.keyword_tiers = normalizeKeywordTiersMap(config.keyword_tiers);
+  config.keyword_gate = {
+    ...DEFAULT_CONFIG.keyword_gate,
+    ...(config.keyword_gate && typeof config.keyword_gate === "object" ? config.keyword_gate : {})
+  };
 
   updates[STORAGE_KEYS.config] = config;
 
@@ -757,10 +966,40 @@ async function processAnalyzeQueue() {
   }
 }
 
-function enqueueAnalyzePosts(posts) {
-  const normalizedPosts = Array.isArray(posts)
-    ? posts.filter((item) => item && item.id && item.text)
-    : [];
+async function enqueueAnalyzePosts(posts) {
+  const { [STORAGE_KEYS.config]: configFromStorage } = await storageGet([STORAGE_KEYS.config]);
+  const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
+
+  const normalizedPosts = [];
+  for (const item of Array.isArray(posts) ? posts : []) {
+    if (!item || !item.id || !item.text) {
+      continue;
+    }
+
+    const gate = evaluateKeywordGate(
+      item.text,
+      Array.isArray(config.keywords) ? config.keywords : [],
+      config.client_name || "",
+      config.keyword_gate || {},
+      config.keyword_tiers || {}
+    );
+
+    if (!gate.pass) {
+      continue;
+    }
+
+    normalizedPosts.push({
+      ...item,
+      keyword_gate_passed: true,
+      keyword_gate_anchor_hits: gate.anchor_hits,
+      keyword_gate_strong_hits: gate.strong_generic_hits,
+      keyword_gate_weak_hits: gate.weak_generic_hits,
+      keywords_matched_local: uniqueItems([
+        ...(Array.isArray(item.keywords_matched_local) ? item.keywords_matched_local : []),
+        ...gate.matched_keywords,
+      ]),
+    });
+  }
 
   if (!normalizedPosts.length) {
     return 0;
@@ -818,6 +1057,12 @@ async function saveConfig(partialConfig) {
   if (!Array.isArray(mergedConfig.keywords)) {
     mergedConfig.keywords = [];
   }
+
+  mergedConfig.keyword_tiers = normalizeKeywordTiersMap(mergedConfig.keyword_tiers);
+  mergedConfig.keyword_gate = {
+    ...DEFAULT_CONFIG.keyword_gate,
+    ...(mergedConfig.keyword_gate && typeof mergedConfig.keyword_gate === "object" ? mergedConfig.keyword_gate : {})
+  };
 
   mergedConfig.backend_url = sanitizeBackendUrl(mergedConfig.backend_url);
 
@@ -1028,7 +1273,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       switch (message.action) {
         case "analyze_posts": {
-          const queued = enqueueAnalyzePosts(message.posts || []);
+          const queued = await enqueueAnalyzePosts(message.posts || []);
           sendResponse({ ok: true, queued });
           return;
         }

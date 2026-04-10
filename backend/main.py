@@ -90,6 +90,22 @@ async def analyze_posts(request: AnalyzeRequest) -> AnalyzeResponse:
             keywords=request.keywords,
         )
 
+        llm_keywords = [
+            str(item).strip()
+            for item in sentiment_data.get("keywords_matched", [])
+            if str(item).strip()
+        ]
+        local_keywords = [
+            str(item).strip()
+            for item in (post.keywords_matched_local or [])
+            if str(item).strip()
+        ]
+        merged_keywords = list(dict.fromkeys([*local_keywords, *llm_keywords]))
+
+        # Hard relevance gate: skip storage/alerts when no monitored keyword evidence exists.
+        if not merged_keywords:
+            continue
+
         sentiment = str(sentiment_data.get("sentiment", "neutral")).strip().lower()
         reactions_count = max(0, int(post.reactions_count or 0))
         comments_count = max(0, int(post.comments_count or 0))
@@ -110,7 +126,7 @@ async def analyze_posts(request: AnalyzeRequest) -> AnalyzeResponse:
             sentiment=sentiment,
             score=float(sentiment_data.get("score", 0.0)),
             category=str(sentiment_data.get("category", "other")),
-            keywords_matched=[str(item) for item in sentiment_data.get("keywords_matched", [])],
+            keywords_matched=merged_keywords,
             bad_buzz_suggestions=[
                 str(item) for item in sentiment_data.get("bad_buzz_suggestions", [])
             ],

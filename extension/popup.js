@@ -14,6 +14,13 @@ const state = {
     ],
     alert_email: "client@banque.tn",
     auto_scan: true,
+    keyword_tiers: {},
+    keyword_gate: {
+      min_anchor_hits: 1,
+      min_strong_generic_hits: 2,
+      min_combo_strong_hits: 1,
+      min_combo_weak_hits: 1
+    },
     backend_url: "http://localhost:8000",
     groq_api_key: "",
     gemini_api_key: ""
@@ -21,6 +28,13 @@ const state = {
   last_scan: null,
   daily_metrics: null,
   groups: [],
+  keywords_editor: [],
+  keyword_gate_editor: {
+    min_anchor_hits: 1,
+    min_strong_generic_hits: 2,
+    min_combo_strong_hits: 1,
+    min_combo_weak_hits: 1
+  },
   auto_scroll_status: null,
   activeTab: "alerts",
   activeFilter: "all"
@@ -33,6 +47,12 @@ const SENTIMENT_LABELS = {
   negative: "Negatif",
   neutral: "Neutre",
   positive: "Positif"
+};
+
+const KEYWORD_TIER_OPTIONS = {
+  anchor: "Brand",
+  strong: "Strong generic",
+  weak: "Weak generic"
 };
 
 function sendMessage(payload) {
@@ -72,6 +92,71 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function normalizeKeywordTerm(value) {
+  return String(value || "")
+    .replace(/[\u00A0\s]+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeTierValue(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "brand" || normalized === "anchor") return "anchor";
+  if (normalized === "strong" || normalized === "strong_generic" || normalized === "domain") return "strong";
+  if (normalized === "weak" || normalized === "weak_generic" || normalized === "generic") return "weak";
+  return "weak";
+}
+
+function inferDefaultTier(term, clientName) {
+  const normalizedTerm = normalizeKeywordTerm(term);
+  const normalizedClient = normalizeKeywordTerm(clientName);
+  if (!normalizedTerm) {
+    return "weak";
+  }
+
+  if (normalizedClient && (
+    normalizedTerm === normalizedClient ||
+    normalizedTerm.startsWith(`${normalizedClient} `) ||
+    normalizedTerm.endsWith(` ${normalizedClient}`) ||
+    normalizedTerm.includes(` ${normalizedClient} `)
+  )) {
+    return "anchor";
+  }
+
+  const tokenCount = normalizedTerm.split(" ").filter(Boolean).length;
+  return tokenCount > 1 ? "strong" : "weak";
+}
+
+function syncKeywordsEditorFromConfig() {
+  const cfg = state.config || {};
+  const terms = Array.isArray(cfg.keywords) ? cfg.keywords : [];
+  const tiers = cfg.keyword_tiers && typeof cfg.keyword_tiers === "object" ? cfg.keyword_tiers : {};
+
+  const seen = new Set();
+  const editor = [];
+  for (const rawTerm of terms) {
+    const term = String(rawTerm || "").trim();
+    const key = normalizeKeywordTerm(term);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    editor.push({
+      term,
+      tier: normalizeTierValue(tiers[key] || inferDefaultTier(term, cfg.client_name || ""))
+    });
+  }
+
+  state.keywords_editor = editor;
+  state.keyword_gate_editor = {
+    min_anchor_hits: Math.max(1, Number((cfg.keyword_gate || {}).min_anchor_hits || 1)),
+    min_strong_generic_hits: Math.max(1, Number((cfg.keyword_gate || {}).min_strong_generic_hits || 2)),
+    min_combo_strong_hits: Math.max(1, Number((cfg.keyword_gate || {}).min_combo_strong_hits || 1)),
+    min_combo_weak_hits: Math.max(1, Number((cfg.keyword_gate || {}).min_combo_weak_hits || 1))
+  };
 }
 
 function getSeverityClass(sentiment) {
@@ -319,9 +404,51 @@ function renderRelevantGroups() {
   });
 }
 
+function renderKeywordsPage() {
+  const listNode = document.getElementById("keywordsList");
+  const emptyNode = document.getElementById("keywordsEmpty");
+  if (!listNode || !emptyNode) {
+    return;
+  }
+
+  listNode.innerHTML = "";
+  const items = Array.isArray(state.keywords_editor) ? state.keywords_editor : [];
+
+  if (!items.length) {
+    emptyNode.classList.remove("hidden");
+  } else {
+    emptyNode.classList.add("hidden");
+  }
+
+  items.forEach((item, index) => {
+    const row = document.createElement("article");
+    row.className = "keywords-row";
+    row.innerHTML = `
+      <p class="keyword-term" title="${escapeHtml(item.term)}">${escapeHtml(item.term)}</p>
+      <select data-action="tier" data-index="${index}">
+        <option value="anchor" ${item.tier === "anchor" ? "selected" : ""}>${KEYWORD_TIER_OPTIONS.anchor}</option>
+        <option value="strong" ${item.tier === "strong" ? "selected" : ""}>${KEYWORD_TIER_OPTIONS.strong}</option>
+        <option value="weak" ${item.tier === "weak" ? "selected" : ""}>${KEYWORD_TIER_OPTIONS.weak}</option>
+      </select>
+      <button class="text-button keyword-remove-button" data-action="remove-keyword" data-index="${index}" type="button">Supprimer</button>
+    `;
+    listNode.appendChild(row);
+  });
+
+  const gateValues = state.keyword_gate_editor || {};
+  const anchorInput = document.getElementById("gateMinAnchorInput");
+  const strongInput = document.getElementById("gateMinStrongInput");
+  const comboStrongInput = document.getElementById("gateMinComboStrongInput");
+  const comboWeakInput = document.getElementById("gateMinComboWeakInput");
+
+  if (anchorInput) anchorInput.value = String(gateValues.min_anchor_hits || 1);
+  if (strongInput) strongInput.value = String(gateValues.min_strong_generic_hits || 2);
+  if (comboStrongInput) comboStrongInput.value = String(gateValues.min_combo_strong_hits || 1);
+  if (comboWeakInput) comboWeakInput.value = String(gateValues.min_combo_weak_hits || 1);
+}
+
 function renderConfig() {
   document.getElementById("clientNameInput").value = state.config.client_name || "";
-  document.getElementById("keywordsInput").value = (state.config.keywords || []).join("\n");
   document.getElementById("alertEmailInput").value = state.config.alert_email || "";
   document.getElementById("autoScanInput").checked = state.config.auto_scan !== false;
   document.getElementById("groqKeyInput").value = state.config.groq_api_key || "";
@@ -334,6 +461,7 @@ function renderAll(scrollToTop = false) {
   updateHeader();
   renderAlerts(scrollToTop);
   renderConfig();
+  renderKeywordsPage();
   renderStats();
   renderRelevantGroups();
   renderAutoScrollStatus(state.auto_scroll_status);
@@ -344,6 +472,7 @@ async function refreshState(scrollToTop = false) {
   state.alerts = Array.isArray(response.alerts) ? response.alerts : [];
   state.unread_count = Number(response.unread_count || 0);
   state.config = response.config || state.config;
+  syncKeywordsEditorFromConfig();
   state.last_scan = response.last_scan || null;
   state.daily_metrics = response.daily_metrics || null;
   state.groups = Array.isArray(response.groups) ? response.groups : [];
@@ -370,6 +499,7 @@ function setupTabs() {
   const panels = {
     alerts: document.getElementById("tab-alerts"),
     config: document.getElementById("tab-config"),
+    keywords: document.getElementById("tab-keywords"),
     stats: document.getElementById("tab-stats")
   };
 
@@ -466,15 +596,8 @@ function setupConfigForm() {
   document.getElementById("configForm").addEventListener("submit", async (event) => {
     event.preventDefault();
 
-    const keywords = document
-      .getElementById("keywordsInput")
-      .value.split("\n")
-      .map((item) => item.trim())
-      .filter(Boolean);
-
     const configPayload = {
       client_name: document.getElementById("clientNameInput").value.trim(),
-      keywords,
       alert_email: document.getElementById("alertEmailInput").value.trim(),
       auto_scan: document.getElementById("autoScanInput").checked,
       groq_api_key: document.getElementById("groqKeyInput").value.trim(),
@@ -487,8 +610,129 @@ function setupConfigForm() {
       const response = await sendMessage({ action: "save_config", config: configPayload });
       if (!response.ok) throw new Error(response.error || "Could not save config");
       state.config = response.config;
+      syncKeywordsEditorFromConfig();
       renderAll();
       setFeedback("Configuration saved.");
+    } catch (error) {
+      setFeedback(String(error), true);
+    }
+  });
+}
+
+function setupKeywordsPageActions() {
+  const newInput = document.getElementById("keywordNewInput");
+  const newTier = document.getElementById("keywordNewTier");
+  const addButton = document.getElementById("keywordAddButton");
+  const listNode = document.getElementById("keywordsList");
+  const saveButton = document.getElementById("saveKeywordsButton");
+
+  if (!newInput || !newTier || !addButton || !listNode || !saveButton) {
+    return;
+  }
+
+  addButton.addEventListener("click", () => {
+    const term = String(newInput.value || "").replace(/[\u00A0\s]+/g, " ").trim();
+    if (!term) {
+      return;
+    }
+
+    const normalized = normalizeKeywordTerm(term);
+    const exists = state.keywords_editor.some((item) => normalizeKeywordTerm(item.term) === normalized);
+    if (exists) {
+      setFeedback("Ce mot-cle existe deja.", true);
+      return;
+    }
+
+    state.keywords_editor.push({
+      term,
+      tier: normalizeTierValue(newTier.value)
+    });
+
+    state.keywords_editor.sort((a, b) => a.term.localeCompare(b.term, "fr", { sensitivity: "base" }));
+    newInput.value = "";
+    renderKeywordsPage();
+  });
+
+  newInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addButton.click();
+    }
+  });
+
+  listNode.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement) || target.dataset.action !== "tier") {
+      return;
+    }
+
+    const index = Number(target.dataset.index || -1);
+    if (!Number.isInteger(index) || index < 0 || index >= state.keywords_editor.length) {
+      return;
+    }
+
+    state.keywords_editor[index].tier = normalizeTierValue(target.value);
+  });
+
+  listNode.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action='remove-keyword']");
+    if (!button) {
+      return;
+    }
+
+    const index = Number(button.dataset.index || -1);
+    if (!Number.isInteger(index) || index < 0 || index >= state.keywords_editor.length) {
+      return;
+    }
+
+    state.keywords_editor.splice(index, 1);
+    renderKeywordsPage();
+  });
+
+  saveButton.addEventListener("click", async () => {
+    const anchorInput = document.getElementById("gateMinAnchorInput");
+    const strongInput = document.getElementById("gateMinStrongInput");
+    const comboStrongInput = document.getElementById("gateMinComboStrongInput");
+    const comboWeakInput = document.getElementById("gateMinComboWeakInput");
+
+    state.keyword_gate_editor = {
+      min_anchor_hits: Math.max(1, Number(anchorInput && anchorInput.value || 1)),
+      min_strong_generic_hits: Math.max(1, Number(strongInput && strongInput.value || 2)),
+      min_combo_strong_hits: Math.max(1, Number(comboStrongInput && comboStrongInput.value || 1)),
+      min_combo_weak_hits: Math.max(1, Number(comboWeakInput && comboWeakInput.value || 1))
+    };
+
+    const keywords = state.keywords_editor
+      .map((item) => String(item.term || "").trim())
+      .filter(Boolean);
+
+    const keywordTiers = {};
+    for (const item of state.keywords_editor) {
+      const key = normalizeKeywordTerm(item.term);
+      if (!key) {
+        continue;
+      }
+      keywordTiers[key] = normalizeTierValue(item.tier);
+    }
+
+    try {
+      const response = await sendMessage({
+        action: "save_config",
+        config: {
+          keywords,
+          keyword_tiers: keywordTiers,
+          keyword_gate: state.keyword_gate_editor
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "Could not save keywords config");
+      }
+
+      state.config = response.config || state.config;
+      syncKeywordsEditorFromConfig();
+      renderKeywordsPage();
+      setFeedback("Keywords config saved.");
     } catch (error) {
       setFeedback(String(error), true);
     }
@@ -622,12 +866,14 @@ function setupStorageAutoRefresh() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  syncKeywordsEditorFromConfig();
   setupTabs();
   setupFilters();
   setupScrollTop();
   setupClearButton();
   setupAlertsActions();
   setupConfigForm();
+  setupKeywordsPageActions();
   setupManualScanButton();
   setupAutoScrollButtons();
   setupRelevantGroupsActions();
