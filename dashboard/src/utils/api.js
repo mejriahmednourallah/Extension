@@ -19,9 +19,16 @@ function normalizeBackendUrl(url) {
 
   try {
     const parsed = new URL(withScheme);
+
+    // Fix a common misconfiguration where host contains encoded spaces (e.g. `%20`).
+    const decodedHost = decodeURIComponent(parsed.hostname || '');
+    if (/\s/.test(decodedHost)) {
+      parsed.hostname = decodedHost.replace(/\s+/g, '-').toLowerCase();
+    }
+
     return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
   } catch (err) {
-    return withScheme.replace(/\/+$/, '');
+    return decodeURIComponent(withScheme).replace(/\s+/g, '-').replace(/\/+$/, '');
   }
 }
 
