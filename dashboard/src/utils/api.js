@@ -1,13 +1,79 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const BACKEND_URL_STORAGE_KEY = 'er_backend_url';
+const DEFAULT_LOCAL_BACKEND_URL = 'http://localhost:8000';
 const BACKEND_PROBE_MAX_ATTEMPTS = 12;
 const BACKEND_PROBE_BASE_DELAY_MS = 1500;
 const BACKEND_PROBE_TIMEOUT_MS = 12000;
 const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
 
+function normalizeBackendUrl(url) {
+  const value = String(url || '').trim();
+  if (!value) {
+    return '';
+  }
+
+  const withScheme = /^https?:\/\//i.test(value)
+    ? value
+    : `${/^(localhost|127\.0\.0\.1)/i.test(value) ? 'http' : 'https'}://${value}`;
+
+  try {
+    const parsed = new URL(withScheme);
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+  } catch (err) {
+    return withScheme.replace(/\/+$/, '');
+  }
+}
+
+function getEnvBackendUrl() {
+  return normalizeBackendUrl(process.env.REACT_APP_API_URL || '');
+}
+
+function getStoredBackendUrl() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return '';
+  }
+
+  try {
+    return normalizeBackendUrl(window.localStorage.getItem(BACKEND_URL_STORAGE_KEY) || '');
+  } catch (err) {
+    return '';
+  }
+}
+
+export function getBackendBaseUrl() {
+  const stored = getStoredBackendUrl();
+  if (stored) {
+    return stored;
+  }
+
+  const fromEnv = getEnvBackendUrl();
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  return DEFAULT_LOCAL_BACKEND_URL;
+}
+
+export function setBackendBaseUrlOverride(url) {
+  const normalized = normalizeBackendUrl(url);
+
+  if (typeof window !== 'undefined' && window.localStorage) {
+    if (normalized) {
+      window.localStorage.setItem(BACKEND_URL_STORAGE_KEY, normalized);
+    } else {
+      window.localStorage.removeItem(BACKEND_URL_STORAGE_KEY);
+    }
+  }
+
+  backendHealthyUntil = 0;
+  backendProbePromise = null;
+  probedBaseUrl = '';
+
+  return getBackendBaseUrl();
+}
+
 const apiClient = axios.create({
-  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -15,12 +81,23 @@ const apiClient = axios.create({
 
 let backendHealthyUntil = 0;
 let backendProbePromise = null;
+let probedBaseUrl = '';
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function ensureBackendHealthy() {
+async function ensureBackendHealthy(baseUrl) {
+  if (!baseUrl) {
+    throw new Error('Backend URL is empty');
+  }
+
+  if (probedBaseUrl !== baseUrl) {
+    backendHealthyUntil = 0;
+    backendProbePromise = null;
+    probedBaseUrl = baseUrl;
+  }
+
   if (backendHealthyUntil > Date.now()) {
     return;
   }
@@ -35,6 +112,7 @@ async function ensureBackendHealthy() {
     for (let attempt = 1; attempt <= BACKEND_PROBE_MAX_ATTEMPTS; attempt += 1) {
       try {
         const response = await apiClient.get('/health', {
+          baseURL: baseUrl,
           timeout: BACKEND_PROBE_TIMEOUT_MS,
           headers: {
             'Cache-Control': 'no-cache',
@@ -77,11 +155,14 @@ async function ensureBackendHealthy() {
 apiClient.interceptors.request.use(
   async (config) => {
     const requestPath = String(config && config.url ? config.url : '');
+    const baseUrl = getBackendBaseUrl();
+    config.baseURL = baseUrl;
+
     if (!requestPath || requestPath === '/health') {
       return config;
     }
 
-    await ensureBackendHealthy();
+    await ensureBackendHealthy(baseUrl);
     return config;
   },
   (error) => Promise.reject(error)

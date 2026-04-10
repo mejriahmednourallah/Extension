@@ -264,6 +264,17 @@ header {
   margin-bottom: 14px;
 }
 
+.debug-url-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.debug-url-row input {
+  width: 100%;
+}
+
 .debug-list {
   max-height: 54vh;
   overflow: auto;
@@ -521,6 +532,10 @@ header {
 
   .debug-modal {
     width: 92vw;
+  }
+
+  .debug-url-row {
+    grid-template-columns: 1fr;
   }
 
   .stats-grid {

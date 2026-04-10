@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { getBackendBaseUrl, setBackendBaseUrlOverride } from '../utils/api';
 
 const DEBUG_ENDPOINTS = [
   { label: 'Health', path: '/health' },
@@ -57,13 +58,27 @@ async function probeEndpoint(baseUrl, endpointPath) {
       error: '',
     };
   } catch (error) {
+    const rawError = String(error && error.message ? error.message : error);
+    let errorHint = rawError;
+
+    const isHttpsPage = typeof window !== 'undefined' && window.location && window.location.protocol === 'https:';
+    const isHttpBackend = /^http:\/\//i.test(baseUrl);
+    const isRemotePage = typeof window !== 'undefined' && window.location && !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname || '');
+    const isLocalBackend = /localhost|127\.0\.0\.1/i.test(baseUrl);
+
+    if (/failed to fetch/i.test(rawError) && isHttpsPage && isHttpBackend) {
+      errorHint = 'Mixed content bloque: dashboard en HTTPS mais backend en HTTP. Utilise une URL backend HTTPS.';
+    } else if (/failed to fetch/i.test(rawError) && isRemotePage && isLocalBackend) {
+      errorHint = 'URL backend locale detectee depuis un site distant. Remplace localhost par ton URL backend Render publique.';
+    }
+
     return {
       path: endpointPath,
       ok: false,
       status: 'network_error',
       durationMs: Math.round(performance.now() - startedAt),
       preview: '',
-      error: String(error && error.message ? error.message : error),
+      error: errorHint,
     };
   } finally {
     clearTimeout(timer);
@@ -129,8 +144,11 @@ export default function Layout({ children, activeTab, onTabChange, user, onLogou
   const [debugLoading, setDebugLoading] = useState(false);
   const [debugResults, setDebugResults] = useState([]);
   const [debugRunAt, setDebugRunAt] = useState('');
+  const [backendBaseUrl, setBackendBaseUrl] = useState(getBackendBaseUrl());
 
-  const backendBaseUrl = (process.env.REACT_APP_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
+  useEffect(() => {
+    setBackendBaseUrl(getBackendBaseUrl());
+  }, []);
 
   useEffect(() => {
     const clockInterval = setInterval(() => {
@@ -145,8 +163,9 @@ export default function Layout({ children, activeTab, onTabChange, user, onLogou
   const runDebugCheck = async () => {
     setDebugLoading(true);
     try {
+      const baseUrl = String(backendBaseUrl || '').trim().replace(/\/+$/, '');
       const probes = await Promise.all(
-        DEBUG_ENDPOINTS.map((item) => probeEndpoint(backendBaseUrl, item.path))
+        DEBUG_ENDPOINTS.map((item) => probeEndpoint(baseUrl, item.path))
       );
 
       const merged = DEBUG_ENDPOINTS.map((item) => {
@@ -180,6 +199,13 @@ export default function Layout({ children, activeTab, onTabChange, user, onLogou
 
   const closeDebug = () => setDebugOpen(false);
 
+  const handleBackendUrlSave = () => {
+    const saved = setBackendBaseUrlOverride(backendBaseUrl);
+    setBackendBaseUrl(saved);
+    setDebugResults([]);
+    setDebugRunAt('');
+  };
+
   const okCount = debugResults.filter((item) => item.ok).length;
 
   return (
@@ -200,6 +226,16 @@ export default function Layout({ children, activeTab, onTabChange, user, onLogou
             <div><strong>Base URL:</strong> {backendBaseUrl}</div>
             <div><strong>Dernier test:</strong> {debugRunAt || 'jamais'}</div>
             <div><strong>Endpoints OK:</strong> {okCount} / {DEBUG_ENDPOINTS.length}</div>
+          </div>
+
+          <div className="debug-url-row">
+            <input
+              type="text"
+              value={backendBaseUrl}
+              onChange={(e) => setBackendBaseUrl(e.target.value)}
+              placeholder="https://your-backend.onrender.com"
+            />
+            <button className="btn-secondary" onClick={handleBackendUrlSave}>Sauvegarder URL</button>
           </div>
 
           <div className="debug-actions">
