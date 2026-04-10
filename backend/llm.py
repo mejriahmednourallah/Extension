@@ -65,50 +65,55 @@ def build_prompt(post_text: str, client_name: str, keywords: list[str]) -> str:
 
     return f"""
 Tu es un expert en e-reputation pour les institutions financieres tunisiennes.
-Contexte business:
-- Canal: post Facebook groupe
-- Usage: triage operationnel par un community manager
-- Langues: Darija tunisienne, francais, arabe standard
-- Priorite: detecter signaux de bad buzz et recommander reponses pragmatiques
 
-Instructions critiques:
-- Retourne UNIQUEMENT un objet JSON valide.
-- N'ajoute aucun markdown, aucun commentaire, aucun texte hors JSON.
-- Si le post est ambigu, choisis "neutral" avec score proche de 0.
-- REGLE DE PERTINENCE: classe "negative" ou "very_negative" UNIQUEMENT si la plainte/probleme vise directement le client surveille.
-- Si le texte est negatif mais parle des banques en general, d'un autre etablissement, ou d'un contexte hors client surveille, retourne "neutral".
-- REGLE DE MOTS-CLES: si aucun mot-cle fourni n'est explicitement present dans le post, retourne "neutral", score 0.0 et "keywords_matched": [].
-- "keywords_matched" contient uniquement des mots-cles effectivement presents dans le post.
-- "bad_buzz_suggestions" contient exactement 3 messages prets pour envoi en masse (bulk send), chacun prefixe par [PUBLIC], [PRIVE], ou [INTERNE].
+Contexte:
+- Canal: post Facebook groupe surveille pour le client: {client_name}
+- Le post a DEJA passe un filtre de pertinence (mots-cles detectes). Ton role est d'evaluer le SENTIMENT et la GRAVITE, pas de revalider la pertinence.
+- Langues possibles: Darija tunisienne, francais, arabe standard, melanges.
+- Usage: triage operationnel temps-reel par un community manager.
 
-Schema de sortie strict:
+Consignes:
+1. Retourne UNIQUEMENT un objet JSON valide, sans markdown, sans commentaires.
+2. Evalue le sentiment du point de vue d'un client ou citoyen parlant d'une banque tunisienne ou du secteur bancaire.
+3. "negative" ou "very_negative": plainte, frustration, arnaque presumee, probleme de service, ton hostile envers une banque ou service bancaire — meme si le nom exact du client n'est pas mentionne.
+4. "positive": satisfaction, eloge, recommandation favorable.
+5. "neutral": simple partage d'info, question sans frustration, ou contenu sans tonalite claire.
+6. Score: float entre -1.0 (tres negatif) et +1.0 (tres positif). Sois precis — evite de rester a 0.0 si une emotion est detectee.
+7. "keywords_matched": liste des mots-cles (fournis ou similaires) presents dans le post. Inclure les equivalents Darija/arabe.
+8. "bad_buzz_suggestions": exactement 3 messages prefixes [PUBLIC], [PRIVE], [INTERNE].
+
+Categories disponibles: service_complaint | fraud_accusation | general_negative | product_complaint | other
+
+Schema JSON strict:
 {{
   "sentiment": "very_negative|negative|neutral|positive",
-  "score": <float entre -1.0 et 1.0>,
+  "score": <float -1.0 a 1.0>,
   "category": "service_complaint|fraud_accusation|general_negative|product_complaint|other",
-  "keywords_matched": [<liste des mots-cles du client trouves>],
+  "keywords_matched": [<mots-cles detectes>],
   "bad_buzz_suggestions": [
-        "[PUBLIC] <Message empathique court pret a publier>",
-        "[PRIVE] <Message DM pour collecte d'infos et resolution>",
-        "[INTERNE] <Consigne operationnelle pour equipe support/risk>"
+    "[PUBLIC] <reponse publique empathique courte>",
+    "[PRIVE] <message prive pour collecte d'infos>",
+    "[INTERNE] <consigne pour equipe support/risk>"
   ]
 }}
 
-Rappels d'analyse:
-- Une accusation explicite d'arnaque/fraude => tendance "fraud_accusation".
-- Une plainte service/retard/support => tendance "service_complaint".
-- Si tonalite non negative avec simple mention marque => "neutral" ou "positive".
+Exemples de signaux negatifs a ne pas rater:
+- Plainte de retrait/virement bloque, carte refusee, compte gele
+- Accusations d'arnaque, frais caches, agios abusifs
+- Frustration envers le service client ou agence
+- Posts en Darija exprimant colere ou deception financiere (ex: "banka m3andha service", "floussi bloqui", "carte matat3melch")
 
 Client surveille: {client_name}
-Mots-cles du client: {keywords_str}
-Post: {post_text}
+Mots-cles de reference: {keywords_str}
+Post a analyser: {post_text}
 """.strip()
 
 
 def _strip_markdown_fences(raw_text: str) -> str:
     text = raw_text.strip()
-    text = re.sub(r"^```(?:json)?\\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\\s*```$", "", text)
+    # \s* (not \\s*) — match actual whitespace/newlines after the opening fence
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
 

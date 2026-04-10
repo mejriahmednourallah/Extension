@@ -41,6 +41,14 @@ const state = {
 };
 
 let autoScrollStatusPollId = null;
+let autoScrollStatusPollInFlight = false;
+
+const AUTO_SCROLL_POLL_INTERVALS_MS = {
+  running: 1500,
+  idle: 4000,
+  hidden: 10000,
+  error: 5000
+};
 
 const SENTIMENT_LABELS = {
   very_negative: "Tres negatif",
@@ -828,20 +836,63 @@ function setupRelevantGroupsActions() {
 
 function setupAutoScrollStatusPolling() {
   if (autoScrollStatusPollId) {
-    clearInterval(autoScrollStatusPollId);
+    clearTimeout(autoScrollStatusPollId);
+    autoScrollStatusPollId = null;
   }
 
-  autoScrollStatusPollId = setInterval(() => {
-    refreshAutoScrollStatus().catch(() => {
+  const scheduleNextPoll = (delayMs) => {
+    if (autoScrollStatusPollId) {
+      clearTimeout(autoScrollStatusPollId);
+      autoScrollStatusPollId = null;
+    }
+
+    autoScrollStatusPollId = setTimeout(() => {
+      void pollOnce();
+    }, Math.max(400, Number(delayMs) || AUTO_SCROLL_POLL_INTERVALS_MS.idle));
+  };
+
+  const pollOnce = async () => {
+    if (document.hidden) {
+      scheduleNextPoll(AUTO_SCROLL_POLL_INTERVALS_MS.hidden);
+      return;
+    }
+
+    if (autoScrollStatusPollInFlight) {
+      scheduleNextPoll(AUTO_SCROLL_POLL_INTERVALS_MS.running);
+      return;
+    }
+
+    autoScrollStatusPollInFlight = true;
+    try {
+      await refreshAutoScrollStatus();
+      const running = Boolean(state.auto_scroll_status && state.auto_scroll_status.running);
+      scheduleNextPoll(running ? AUTO_SCROLL_POLL_INTERVALS_MS.running : AUTO_SCROLL_POLL_INTERVALS_MS.idle);
+    } catch (_) {
       // Ignore polling failures and keep the last visible state.
-    });
-  }, 1200);
+      scheduleNextPoll(AUTO_SCROLL_POLL_INTERVALS_MS.error);
+    } finally {
+      autoScrollStatusPollInFlight = false;
+    }
+  };
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      scheduleNextPoll(AUTO_SCROLL_POLL_INTERVALS_MS.hidden);
+      return;
+    }
+
+    void pollOnce();
+  });
+
+  void pollOnce();
 
   window.addEventListener("beforeunload", () => {
     if (autoScrollStatusPollId) {
-      clearInterval(autoScrollStatusPollId);
+      clearTimeout(autoScrollStatusPollId);
       autoScrollStatusPollId = null;
     }
+
+    autoScrollStatusPollInFlight = false;
   });
 }
 

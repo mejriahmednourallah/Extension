@@ -12,22 +12,64 @@ const DEFAULT_KEYWORD_GATE = {
   min_anchor_hits: 1,
   min_strong_generic_hits: 2,
   min_combo_strong_hits: 1,
-  min_combo_weak_hits: 1
+  min_combo_weak_hits: 1,
+  allow_single_keyword_hit: true
 };
 
 const WEAK_GENERIC_KEYWORDS = new Set(
   [
+    // French
     "banque",
     "bank",
+    "carte",
+    "compte",
+    "credit",
+    "pret",
+    "argent",
+    "monnaie",
+    "paiement",
+    "transaction",
+    "retrait",
+    "depot",
+    "transfert",
+    "remboursement",
+    "plainte",
+    "reclamation",
+    "service client",
+    "atm",
+    "rib",
+    "iban",
+    // Darija (Tunisian Arabic)
+    "banka",
+    "banki",
+    "karta",
+    "kart",
+    "flous",
+    "flousse",
+    "flousi",
+    "flousna",
+    "masraf",
+    "7sab",
+    "7isab",
+    "tnajem",
+    // Arabic
     "بنك",
     "البنك",
     "بنوك",
     "مصرف",
     "المصرف",
+    "فلوس",
+    "فلوسي",
+    "حسابي",
+    "بطاقتي",
+    "تحويل",
+    "سحب",
+    "ايداع",
+    "رصيد",
+    "قرض",
     "atm",
     "rib",
-    "iban",
-    "قرض"
+    "iban"
   ].map((item) => item.toLowerCase())
 );
 
@@ -52,6 +94,16 @@ const BRAND_SPECIFIC_KEYWORDS = new Set(
 
 const processedPostIds = new Set();
 const queuedPostsById = new Map();
+
+const extractionDebug = {
+  article_nodes_seen: 0,
+  article_nodes_processed: 0,
+  accepted_posts: 0,
+  dropped_short_text: 0,
+  dropped_keyword_gate: 0,
+  dropped_duplicate_or_invalid: 0,
+  scanned_posts: []
+};
 
 let observer = null;
 let autoScanEnabled = true;
@@ -88,6 +140,41 @@ function normalizeWhitespace(value) {
   return String(value || "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function resetExtractionDebug() {
+  extractionDebug.article_nodes_seen = 0;
+  extractionDebug.article_nodes_processed = 0;
+  extractionDebug.accepted_posts = 0;
+  extractionDebug.dropped_short_text = 0;
+  extractionDebug.dropped_keyword_gate = 0;
+  extractionDebug.dropped_duplicate_or_invalid = 0;
+  extractionDebug.scanned_posts = [];
+}
+
+function getExtractionDebugSnapshot() {
+  return {
+    article_nodes_seen: extractionDebug.article_nodes_seen,
+    article_nodes_processed: extractionDebug.article_nodes_processed,
+    accepted_posts: extractionDebug.accepted_posts,
+    dropped_short_text: extractionDebug.dropped_short_text,
+    dropped_keyword_gate: extractionDebug.dropped_keyword_gate,
+    dropped_duplicate_or_invalid: extractionDebug.dropped_duplicate_or_invalid,
+    scanned_posts: Array.isArray(extractionDebug.scanned_posts)
+      ? extractionDebug.scanned_posts.slice()
+      : []
+  };
+}
+
+function pushScannedPostDebug(entry) {
+  extractionDebug.scanned_posts.push({
+    index: Number(entry.index || 0),
+    reason: String(entry.reason || "unknown"),
+    text_length: Math.max(0, Number(entry.text_length || 0)),
+    text_preview: String(entry.text_preview || ""),
+    post_id: entry.post_id ? String(entry.post_id) : null,
+    author: String(entry.author || "")
+  });
 }
 
 function stripEmoji(value) {
@@ -244,8 +331,9 @@ function evaluateKeywordGate(text, config) {
   const anchorHits = uniqueItems(anchorMatches).length;
   const strongHits = uniqueItems(strongMatches).length;
   const weakHits = uniqueItems(weakMatches).length;
+  const matchedKeywords = uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches]);
 
-  const pass =
+  const passByThresholds =
     anchorHits >= Math.max(1, Number(keywordGate.min_anchor_hits || 1)) ||
     strongHits >= Math.max(1, Number(keywordGate.min_strong_generic_hits || 2)) ||
     (
@@ -253,12 +341,23 @@ function evaluateKeywordGate(text, config) {
       weakHits >= Math.max(1, Number(keywordGate.min_combo_weak_hits || 1))
     );
 
+  const allowSingleKeywordHit = keywordGate.allow_single_keyword_hit !== false;
+  const passBySingleKeywordHit = allowSingleKeywordHit && matchedKeywords.length >= 1;
+
+  const pass = passByThresholds || passBySingleKeywordHit;
+  const passReason = passByThresholds
+    ? "threshold"
+    : passBySingleKeywordHit
+      ? "single_keyword_hit"
+      : "none";
+
   return {
     pass,
+    pass_reason: passReason,
     anchor_hits: anchorHits,
     strong_generic_hits: strongHits,
     weak_generic_hits: weakHits,
-    matched_keywords: uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches])
+    matched_keywords: matchedKeywords
   };
 }
 
@@ -368,9 +467,86 @@ function safeBase64(value) {
   }
 }
 
-function buildPostId(text) {
-  const key = cleanText(text).slice(0, 50).toLowerCase();
-  return safeBase64(key).replace(/=+$/g, "").slice(0, 80);
+function stableHashFNV1a(value) {
+  const input = String(value || "");
+  let hash = 0x811c9dc5;
+
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function buildPostId({ text, author, postUrl, groupUrl, timestamp }) {
+  const payload = [
+    cleanText(author || ""),
+    cleanText(text || ""),
+    normalizeWhitespace(postUrl || ""),
+    normalizeWhitespace(groupUrl || ""),
+    normalizeWhitespace(timestamp || "")
+  ].join("\n");
+
+  const primaryHash = stableHashFNV1a(payload);
+  const secondaryHash = stableHashFNV1a(`${payload.length}:${payload.slice(-160)}`);
+  return `p_${primaryHash}${secondaryHash}`;
+}
+
+// Matches /groups/ID/search/ — classic group search
+function isFacebookGroupSearchPath(pathname) {
+  return /\/groups\/[^/]+\/search(?:\/|$)/i.test(String(pathname || ""));
+}
+
+// Matches /groups/ID/keyword/WORD — Facebook's keyword-browse tab
+function isFacebookGroupKeywordPath(pathname) {
+  return /\/groups\/[^/]+\/keyword(?:\/|$)/i.test(String(pathname || ""));
+}
+
+// Matches /groups/ID/hashtag/WORD — Facebook hashtag filter within a group
+function isFacebookGroupHashtagPath(pathname) {
+  return /\/groups\/[^/]+\/hashtag(?:\/|$)/i.test(String(pathname || ""));
+}
+
+/**
+ * Returns the active search/keyword/hashtag term for the current page, or ""
+ * for normal group feed pages. Any non-empty return value means two things:
+ *   1. The keyword gate bypass (search_results) can apply.
+ *   2. collectArticleNodes switches to its search-page DOM fallback strategies.
+ */
+function getSearchQueryFromUrl(url = window.location.href) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const pathname = parsed.pathname;
+
+    // /groups/ID/search/?q=WORD
+    if (isFacebookGroupSearchPath(pathname)) {
+      return normalizeKeywordText(parsed.searchParams.get("q") || "");
+    }
+
+    // /groups/ID/keyword/WORD  →  extract slug from path
+    if (isFacebookGroupKeywordPath(pathname)) {
+      const match = pathname.match(/\/groups\/[^/]+\/keyword\/([^/?#]+)/i);
+      if (match && match[1]) {
+        return normalizeKeywordText(decodeURIComponent(match[1]));
+      }
+      // path ends at /keyword/ with no slug — page is still a keyword browse view
+      return "keyword_browse";
+    }
+
+    // /groups/ID/hashtag/WORD  →  extract slug from path
+    if (isFacebookGroupHashtagPath(pathname)) {
+      const match = pathname.match(/\/groups\/[^/]+\/hashtag\/([^/?#]+)/i);
+      if (match && match[1]) {
+        return normalizeKeywordText(decodeURIComponent(match[1]));
+      }
+      return "hashtag_browse";
+    }
+
+    return "";
+  } catch (_) {
+    return "";
+  }
 }
 
 function resolveGroupName() {
@@ -419,46 +595,115 @@ function extractTimestampAndUrl(article) {
 function extractPostFromArticle(article) {
   const text = cleanText(article.innerText || article.textContent || "");
   if (text.length < MIN_POST_LENGTH) {
+    extractionDebug.dropped_short_text += 1;
     return null;
   }
 
+  const currentPageUrl = window.location.href;
+  const searchQuery = getSearchQueryFromUrl(currentPageUrl);
+  const searchResultsMode = Boolean(searchQuery);
   const keywordGate = evaluateKeywordGate(text, runtimeDetectionConfig);
-  if (!keywordGate.pass) {
+  if (!keywordGate.pass && !searchResultsMode) {
+    extractionDebug.dropped_keyword_gate += 1;
     return null;
   }
 
-  const postId = buildPostId(text);
-  if (!postId || processedPostIds.has(postId)) {
-    return null;
-  }
-
+  const author = extractAuthor(article);
   const { timestamp, post_url: postUrl } = extractTimestampAndUrl(article);
+  const groupUrl = currentPageUrl;
+  const postId = buildPostId({
+    text,
+    author,
+    postUrl,
+    groupUrl,
+    timestamp
+  });
+
+  if (!postId || processedPostIds.has(postId)) {
+    extractionDebug.dropped_duplicate_or_invalid += 1;
+    return null;
+  }
+
   const engagement = extractEngagementCounts(article);
+  const matchedKeywordsLocal = uniqueItems([
+    ...keywordGate.matched_keywords,
+    ...(searchQuery ? [searchQuery] : [])
+  ]);
+  const keywordGateOverride = !keywordGate.pass && searchResultsMode ? "search_results" : "";
 
   const post = {
     id: postId,
     text,
-    author: extractAuthor(article),
+    author,
     post_url: postUrl,
     group_name: resolveGroupName(),
-    group_url: window.location.href,
+    group_url: groupUrl,
     timestamp: timestamp || new Date().toISOString(),
     reactions_count: engagement.reactions_count,
     comments_count: engagement.comments_count,
     shares_count: engagement.shares_count,
-    keywords_matched_local: keywordGate.matched_keywords,
-    keyword_gate_passed: true,
+    source_page_url: currentPageUrl,
+    search_query: searchQuery,
+    keywords_matched_local: matchedKeywordsLocal,
+    keyword_gate_passed: keywordGate.pass || searchResultsMode,
+    keyword_gate_pass_reason: String(keywordGate.pass_reason || "none"),
+    keyword_gate_override: keywordGateOverride,
     keyword_gate_anchor_hits: keywordGate.anchor_hits,
     keyword_gate_strong_hits: keywordGate.strong_generic_hits,
     keyword_gate_weak_hits: keywordGate.weak_generic_hits
   };
 
   processedPostIds.add(postId);
+  extractionDebug.accepted_posts += 1;
   return post;
+}
+
+// POST_LINK_SELECTOR matches any anchor that points to a Facebook post or permalink.
+const POST_LINK_SELECTOR = "a[href*='/posts/'], a[href*='/permalink/'], a[href*='story_fbid']";
+
+// Minimum text length for a container to be considered a post card on search pages.
+const SEARCH_CARD_MIN_TEXT = 60;
+
+/**
+ * Given an anchor element that points to a post, walk up the DOM to find the
+ * outermost container that is still a single "post card" — i.e., the element
+ * right before the feed/list container that holds all cards.
+ */
+function findPostCardContainer(link) {
+  const STOP_ROLES = new Set(["feed", "main", "navigation", "banner", "contentinfo", "complementary"]);
+  const STOP_TAGS = new Set(["BODY", "HTML", "MAIN", "HEADER", "FOOTER", "NAV"]);
+
+  let best = null;
+  let el = link.parentElement;
+
+  for (let depth = 0; depth < 20 && el; depth += 1) {
+    if (STOP_TAGS.has(el.tagName)) break;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (STOP_ROLES.has(role)) break;
+
+    const text = cleanText(el.innerText || el.textContent || "");
+    if (text.length >= SEARCH_CARD_MIN_TEXT) {
+      // Keep climbing as long as the next parent would still be a card-level element,
+      // but stop before we absorb multiple cards (detect by sudden huge text growth).
+      if (best) {
+        const parentText = cleanText((el.parentElement && (el.parentElement.innerText || el.parentElement.textContent)) || "");
+        const parentRole = el.parentElement ? (el.parentElement.getAttribute("role") || "").toLowerCase() : "";
+        if (STOP_ROLES.has(parentRole) || parentText.length > text.length * 3) {
+          break; // parent is a multi-card container — stop here
+        }
+      }
+      best = el;
+    }
+
+    el = el.parentElement;
+  }
+
+  return best;
 }
 
 function collectArticleNodes(root) {
   const nodes = [];
+  const isSearchPage = Boolean(getSearchQueryFromUrl());
 
   if (root instanceof Element) {
     if (root.matches("div[role='article']")) {
@@ -475,9 +720,57 @@ function collectArticleNodes(root) {
     }
   }
 
+  // Standard fallback — covers normal group feed.
   if (!nodes.length) {
     nodes.push(...document.querySelectorAll("div[data-pagelet^='FeedUnit_'], div[role='article']"));
   }
+
+  // ── Search-page fallback ──────────────────────────────────────────────────
+  // Facebook group search results (/groups/ID/search/?q=...) do NOT use
+  // div[role='article'] or FeedUnit_ pagelets. We use three escalating strategies.
+  if (isSearchPage && !nodes.length) {
+    // Strategy 1: direct children of any feed container that contain a post link.
+    const feedContainers = document.querySelectorAll("[role='feed']");
+    for (const feed of feedContainers) {
+      for (const child of feed.children) {
+        if (!(child instanceof Element)) continue;
+        const text = cleanText(child.innerText || child.textContent || "");
+        if (text.length < SEARCH_CARD_MIN_TEXT) continue;
+        if (child.querySelector(POST_LINK_SELECTOR)) {
+          nodes.push(child);
+        }
+      }
+    }
+  }
+
+  if (isSearchPage && !nodes.length) {
+    // Strategy 2: look for any pagelet containers other than FeedUnit_.
+    const pagelets = document.querySelectorAll("div[data-pagelet]");
+    for (const pagelet of pagelets) {
+      if (!pagelet.querySelector(POST_LINK_SELECTOR)) continue;
+      const text = cleanText(pagelet.innerText || pagelet.textContent || "");
+      if (text.length < SEARCH_CARD_MIN_TEXT) continue;
+      // Only use direct children that look like cards, not the full pagelet.
+      for (const child of pagelet.children) {
+        if (!(child instanceof Element)) continue;
+        const childText = cleanText(child.innerText || child.textContent || "");
+        if (childText.length >= SEARCH_CARD_MIN_TEXT && child.querySelector(POST_LINK_SELECTOR)) {
+          nodes.push(child);
+        }
+      }
+    }
+  }
+
+  if (isSearchPage && !nodes.length) {
+    // Strategy 3 (broadest): walk up from every visible post link to find its card container.
+    const postLinks = document.querySelectorAll(POST_LINK_SELECTOR);
+    for (const link of postLinks) {
+      if (!(link instanceof Element)) continue;
+      const card = findPostCardContainer(link);
+      if (card) nodes.push(card);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const uniqueNodes = [];
   const seen = new Set();
@@ -485,6 +778,15 @@ function collectArticleNodes(root) {
     if (!node || seen.has(node)) {
       continue;
     }
+    // Skip nodes that are ancestors/descendants of already-seen nodes (dedup nested).
+    let dominated = false;
+    for (const existing of uniqueNodes) {
+      if (existing.contains(node) || node.contains(existing)) {
+        dominated = true;
+        break;
+      }
+    }
+    if (dominated) continue;
     seen.add(node);
     uniqueNodes.push(node);
   }
@@ -496,14 +798,68 @@ function extractPostsFromPage(root = document.body) {
   const posts = [];
   const seenIds = new Set();
   const articleNodes = collectArticleNodes(root);
+  extractionDebug.article_nodes_seen += articleNodes.length;
 
   for (const article of articleNodes) {
+    const articleIndex = extractionDebug.article_nodes_processed + 1;
+    const rawText = cleanText(article && (article.innerText || article.textContent || ""));
+    const preview = rawText.slice(0, 220);
+    const beforeShort = extractionDebug.dropped_short_text;
+    const beforeKeyword = extractionDebug.dropped_keyword_gate;
+    const beforeDup = extractionDebug.dropped_duplicate_or_invalid;
+
+    extractionDebug.article_nodes_processed += 1;
     const post = extractPostFromArticle(article);
-    if (!post || seenIds.has(post.id)) {
+
+    if (!post) {
+      let reason = "dropped_unknown";
+      if (extractionDebug.dropped_short_text > beforeShort) {
+        reason = "dropped_short_text";
+      } else if (extractionDebug.dropped_keyword_gate > beforeKeyword) {
+        reason = "dropped_keyword_gate";
+      } else if (extractionDebug.dropped_duplicate_or_invalid > beforeDup) {
+        reason = "dropped_duplicate_or_invalid";
+      }
+
+      pushScannedPostDebug({
+        index: articleIndex,
+        reason,
+        text_length: rawText.length,
+        text_preview: preview,
+        post_id: null,
+        author: ""
+      });
       continue;
     }
+
+    if (seenIds.has(post.id)) {
+      extractionDebug.dropped_duplicate_or_invalid += 1;
+      pushScannedPostDebug({
+        index: articleIndex,
+        reason: "dropped_duplicate_in_batch",
+        text_length: rawText.length,
+        text_preview: preview,
+        post_id: post.id,
+        author: post.author || ""
+      });
+      continue;
+    }
+
     seenIds.add(post.id);
     posts.push(post);
+
+    pushScannedPostDebug({
+      index: articleIndex,
+      reason: post.keyword_gate_override
+        ? "accepted_search_override"
+        : post.keyword_gate_pass_reason === "single_keyword_hit"
+          ? "accepted_relaxed_keyword_hit"
+          : "accepted",
+      text_length: rawText.length,
+      text_preview: preview,
+      post_id: post.id,
+      author: post.author || ""
+    });
   }
 
   return posts;
@@ -790,12 +1146,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "manual_scan") {
-    const posts = extractPostsFromPage(document.body);
-    if (posts.length) {
-      queuePosts(posts);
-    }
-    sendResponse({ count: posts.length });
-    return true;
+    // Reload config first so runtimeDetectionConfig is current even on a
+    // freshly-injected content script (loadAutoScanSetting may not have
+    // fired yet because it is async).
+    chrome.storage.local.get(["config"], (storageData) => {
+      const cfg = storageData.config || {};
+      updateRuntimeDetectionConfig(cfg);
+      resetExtractionDebug();
+      const posts = extractPostsFromPage(document.body);
+      if (posts.length) {
+        queuePosts(posts);
+      }
+      sendResponse({
+        count: posts.length,
+        debug: getExtractionDebugSnapshot(),
+        page_url: window.location.href
+      });
+    });
+    return true; // keep message channel open for async sendResponse
   }
 
   if (message.action === "auto_scroll_start") {

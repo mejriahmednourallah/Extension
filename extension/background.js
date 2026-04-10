@@ -13,6 +13,18 @@ const STORAGE_KEYS = {
 const DEFAULT_CONFIG = {
   client_name: "Banque biat",
   keywords: [
+    // ── Brand anchors ──────────────────────────────────────────────
+    "biat",
+    "banque biat",
+    "biat bank",
+    "carte biat",
+    "compte biat",
+    "credit biat",
+    "agence biat",
+    "application biat",
+    "بيات",
+    "بنك بيات",
+    // ── French banking (standard) ──────────────────────────────────
     "banque",
     "bank",
     "banque tunisie",
@@ -30,6 +42,65 @@ const DEFAULT_CONFIG = {
     "iban",
     "atm",
     "guichet automatique",
+    "carte",
+    "compte",
+    "credit",
+    "pret",
+    "virement bancaire",
+    "decouverte",
+    "decouvert",
+    "agios",
+    "plainte",
+    "reclamation",
+    "réclamation",
+    "service client",
+    "service clientele",
+    "probleme banque",
+    "problème banque",
+    // ── French everyday money/service terms ───────────────────────
+    "argent",
+    "monnaie",
+    "paiement",
+    "transaction",
+    "retrait",
+    "depot",
+    "epargne",
+    "transfert",
+    "remboursement",
+    // ── Darija (Tunisian Arabic) banking / money ───────────────────
+    "banka",
+    "banki",
+    "banka biat",
+    "carte banka",
+    "karta",
+    "kart",
+    "flous",
+    "flousse",
+    "flousi",
+    "flousna",
+    "mani flous",
+    "compte mta3i",
+    "compte mte3i",
+    "compte malesh",
+    "compte barre",
+    "compte bloque",
+    "virement mte3i",
+    "khdem banka",
+    "masraf",
+    "mochkla banka",
+    "mochkla fi banka",
+    "service banka",
+    "7sab",
+    "7isab",
+    "carte mte3i",
+    "carte mta3i",
+    "recharge ma3meltech",
+    "retrait ma3meltech",
+    "tnajem",
+    "tnaheb",
+    "barra compte",
+    "salamtek banka",
+    // ── Arabic (MSA + Darija) ──────────────────────────────────────
     "بنك",
     "البنك",
     "بنوك",
@@ -41,7 +112,18 @@ const DEFAULT_CONFIG = {
     "حساب بنكي",
     "قرض",
     "تحويل بنكي",
-    "خدمة الحرفاء"
+    "خدمة الحرفاء",
+    "فلوس",
+    "فلوسي",
+    "حسابي",
+    "بطاقتي",
+    "مشكل بنك",
+    "مشكلة بنك",
+    "خدمة زبائن",
+    "تحويل",
+    "سحب",
+    "ايداع",
+    "رصيد"
   ],
   alert_email: "client@banque.tn",
   auto_scan: true,
@@ -50,7 +132,8 @@ const DEFAULT_CONFIG = {
     min_anchor_hits: 1,
     min_strong_generic_hits: 2,
     min_combo_strong_hits: 1,
-    min_combo_weak_hits: 1
+    min_combo_weak_hits: 1,
+    allow_single_keyword_hit: true
   },
   backend_url: "http://localhost:8000",
   groq_api_key: "",
@@ -149,6 +232,87 @@ let analyzeWorkerRunning = false;
 const backendHealthyUntilByUrl = new Map();
 const groupsSyncedUntilByUrl = new Map();
 const extensionStateSyncedUntilByUrl = new Map();
+const SW_LOG_PREFIX = "[ERW-SW]";
+const MESSAGE_LOG_THROTTLE_MS = {
+  auto_scroll_status: 5000,
+  get_state: 3000
+};
+const messageLogThrottleState = new Map();
+
+function logSw(event, details) {
+  if (details === undefined) {
+    console.info(`${SW_LOG_PREFIX} ${event}`);
+    return;
+  }
+
+  console.info(`${SW_LOG_PREFIX} ${event}`, details);
+}
+
+function shouldLogMessageReceived(action) {
+  const key = String(action || "");
+  const throttleMs = Number(MESSAGE_LOG_THROTTLE_MS[key] || 0);
+  if (!throttleMs) {
+    return { log: true, suppressed: 0 };
+  }
+
+  const now = Date.now();
+  const previous = messageLogThrottleState.get(key);
+  if (!previous || now - previous.lastLoggedAt >= throttleMs) {
+    const suppressed = previous ? previous.suppressed : 0;
+    messageLogThrottleState.set(key, { lastLoggedAt: now, suppressed: 0 });
+    return { log: true, suppressed };
+  }
+
+  previous.suppressed += 1;
+  return { log: false, suppressed: previous.suppressed };
+}
+
+function summarizePostForLog(post, extra = {}) {
+  const text = String((post && post.text) || "");
+  const compact = text.replace(/[\u00A0\s]+/g, " ").trim();
+  return {
+    id: String((post && post.id) || ""),
+    author: String((post && post.author) || ""),
+    text_length: compact.length,
+    text_preview: compact.slice(0, 180),
+    group_url: String((post && post.group_url) || ""),
+    post_url: String((post && post.post_url) || ""),
+    ...extra,
+  };
+}
+
+function logManualScanDebug(response) {
+  const debug = response && response.debug;
+  if (!debug || !Array.isArray(debug.scanned_posts)) {
+    return;
+  }
+
+  logSw("manual_scan.debug_summary", {
+    page_url: response.page_url || "",
+    count: Number(response.count || 0),
+    article_nodes_seen: Number(debug.article_nodes_seen || 0),
+    article_nodes_processed: Number(debug.article_nodes_processed || 0),
+    accepted_posts: Number(debug.accepted_posts || 0),
+    dropped_short_text: Number(debug.dropped_short_text || 0),
+    dropped_keyword_gate: Number(debug.dropped_keyword_gate || 0),
+    dropped_duplicate_or_invalid: Number(debug.dropped_duplicate_or_invalid || 0),
+    scanned_posts_count: debug.scanned_posts.length,
+  });
+
+  if (debug.scanned_posts.length) {
+    console.table(debug.scanned_posts);
+    for (const scanned of debug.scanned_posts) {
+      logSw("manual_scan.post_scanned", {
+        index: Number(scanned && scanned.index || 0),
+        reason: String(scanned && scanned.reason || "unknown"),
+        text_length: Number(scanned && scanned.text_length || 0),
+        text_preview: String(scanned && scanned.text_preview || ""),
+        post_id: scanned && scanned.post_id ? String(scanned.post_id) : "",
+        author: String(scanned && scanned.author || ""),
+      });
+    }
+  }
+}
 
 function getTodayKey() {
   const now = new Date();
@@ -446,8 +610,9 @@ function evaluateKeywordGate(text, keywords, clientName, gateConfig, keywordTier
   const anchorHits = uniqueItems(anchorMatches).length;
   const strongHits = uniqueItems(strongMatches).length;
   const weakHits = uniqueItems(weakMatches).length;
+  const matchedKeywords = uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches]);
 
-  const pass =
+  const passByThresholds =
     anchorHits >= Math.max(1, Number(cfg.min_anchor_hits || 1)) ||
     strongHits >= Math.max(1, Number(cfg.min_strong_generic_hits || 2)) ||
     (
@@ -455,12 +620,23 @@ function evaluateKeywordGate(text, keywords, clientName, gateConfig, keywordTier
       weakHits >= Math.max(1, Number(cfg.min_combo_weak_hits || 1))
     );
 
+  const allowSingleKeywordHit = cfg.allow_single_keyword_hit !== false;
+  const passBySingleKeywordHit = allowSingleKeywordHit && matchedKeywords.length >= 1;
+
+  const pass = passByThresholds || passBySingleKeywordHit;
+  const passReason = passByThresholds
+    ? "threshold"
+    : passBySingleKeywordHit
+      ? "single_keyword_hit"
+      : "none";
+
   return {
     pass,
+    pass_reason: passReason,
     anchor_hits: anchorHits,
     strong_generic_hits: strongHits,
     weak_generic_hits: weakHits,
-    matched_keywords: uniqueItems([...anchorMatches, ...strongMatches, ...weakMatches]),
+    matched_keywords: matchedKeywords,
   };
 }
 
@@ -813,7 +989,7 @@ async function callAnalyzeApi(posts) {
   const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
   const installationId = String(installationIdFromStorage || "").trim() || (await ensureInstallationId());
 
-  const payload = {
+  const requestPayload = {
     posts,
     client_name: config.client_name || "",
     keywords: Array.isArray(config.keywords) ? config.keywords : [],
@@ -824,6 +1000,12 @@ async function callAnalyzeApi(posts) {
   const backendUrl = sanitizeBackendUrl(config.backend_url);
   const headers = buildBackendHeaders(backendUrl);
 
+  logSw("analyze_api.start", {
+    received_posts: Array.isArray(posts) ? posts.length : 0,
+    backend_url: backendUrl,
+    installation_id: installationId,
+  });
+
   // Render free services can be cold; probe health with retries before analyze.
   await probeBackendHealth(backendUrl, headers);
 
@@ -831,11 +1013,17 @@ async function callAnalyzeApi(posts) {
   const monitoredGroups = await refreshGroupsFromBackend(backendUrl, headers);
 
   const filteredPosts = filterPostsByMonitoredGroups(posts, monitoredGroups);
+  logSw("analyze_api.group_filter", {
+    monitored_groups: Array.isArray(monitoredGroups) ? monitoredGroups.length : 0,
+    before: Array.isArray(posts) ? posts.length : 0,
+    after: filteredPosts.length,
+  });
   if (!filteredPosts.length) {
+    logSw("analyze_api.skipped_empty_after_group_filter");
     return { results: [], alerts_sent: 0 };
   }
 
-  payload.posts = filteredPosts;
+  requestPayload.posts = filteredPosts;
 
   let response = null;
   let lastAnalyzeError = null;
@@ -846,7 +1034,7 @@ async function callAnalyzeApi(posts) {
         {
           method: "POST",
           headers,
-          body: JSON.stringify(payload)
+          body: JSON.stringify(requestPayload)
         },
         ANALYZE_REQUEST_TIMEOUT_MS
       );
@@ -884,13 +1072,21 @@ async function callAnalyzeApi(posts) {
     );
   }
 
-  return response.json();
+  const responsePayload = await response.json();
+  logSw("analyze_api.success", {
+    sent_posts: filteredPosts.length,
+    results: Array.isArray(responsePayload && responsePayload.results) ? responsePayload.results.length : 0,
+    alerts_sent: Number(responsePayload && responsePayload.alerts_sent || 0),
+  });
+  return responsePayload;
 }
 
 async function handleAnalyzePosts(posts) {
   if (!Array.isArray(posts) || !posts.length) {
     return { count: 0, alerts_sent: 0, results: [] };
   }
+
+  logSw("handle_analyze.start", { posts: posts.length });
 
   const apiResponse = await callAnalyzeApi(posts);
   const results = Array.isArray(apiResponse.results) ? apiResponse.results : [];
@@ -935,6 +1131,13 @@ async function handleAnalyzePosts(posts) {
   await updateBadge(unreadCount);
   newEntries.forEach(showNotification);
 
+  logSw("handle_analyze.done", {
+    new_entries: newEntries.length,
+    api_results: results.length,
+    alerts_sent: Number(apiResponse.alerts_sent || 0),
+    unread_count: unreadCount,
+  });
+
   return {
     count: newEntries.length,
     alerts_sent: Number(apiResponse.alerts_sent || 0),
@@ -944,16 +1147,20 @@ async function handleAnalyzePosts(posts) {
 
 async function processAnalyzeQueue() {
   if (analyzeWorkerRunning) {
+    logSw("queue.skip_worker_already_running", { queue_length: analyzeQueue.length });
     return;
   }
 
   analyzeWorkerRunning = true;
+  logSw("queue.worker_started", { queue_length: analyzeQueue.length });
   try {
     while (analyzeQueue.length) {
       const posts = analyzeQueue.shift();
       if (!Array.isArray(posts) || !posts.length) {
         continue;
       }
+
+      logSw("queue.dequeue", { batch_posts: posts.length, remaining: analyzeQueue.length });
 
       try {
         await handleAnalyzePosts(posts);
@@ -963,16 +1170,47 @@ async function processAnalyzeQueue() {
     }
   } finally {
     analyzeWorkerRunning = false;
+    logSw("queue.worker_finished", { queue_length: analyzeQueue.length });
   }
 }
 
 async function enqueueAnalyzePosts(posts) {
   const { [STORAGE_KEYS.config]: configFromStorage } = await storageGet([STORAGE_KEYS.config]);
   const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
+  const inputPosts = Array.isArray(posts) ? posts : [];
 
   const normalizedPosts = [];
-  for (const item of Array.isArray(posts) ? posts : []) {
+  let droppedByKeywordGate = 0;
+  let acceptedBySearchOverride = 0;
+  for (const item of inputPosts) {
     if (!item || !item.id || !item.text) {
+      continue;
+    }
+
+    const searchOverride = String(item.keyword_gate_override || "").toLowerCase() === "search_results";
+    // Trust keyword_gate_passed=true set by content.js (covers both normal
+    // keyword hits AND the search-results bypass).
+    const contentScriptPassed = item.keyword_gate_passed === true;
+    logSw("queue.post_seen", summarizePostForLog(item, {
+      keyword_override: String(item.keyword_gate_override || ""),
+      search_query: String(item.search_query || ""),
+      content_script_passed: contentScriptPassed,
+    }));
+
+    if (searchOverride || contentScriptPassed) {
+      acceptedBySearchOverride += 1;
+      logSw("queue.post_accepted_search_override", summarizePostForLog(item));
+      normalizedPosts.push({
+        ...item,
+        keyword_gate_passed: true,
+        keyword_gate_anchor_hits: Math.max(0, Number(item.keyword_gate_anchor_hits || 0)),
+        keyword_gate_strong_hits: Math.max(0, Number(item.keyword_gate_strong_hits || 0)),
+        keyword_gate_weak_hits: Math.max(0, Number(item.keyword_gate_weak_hits || 0)),
+        keywords_matched_local: uniqueItems([
+          ...(Array.isArray(item.keywords_matched_local) ? item.keywords_matched_local : []),
+          ...(item.search_query ? [String(item.search_query)] : []),
+        ]),
+      });
       continue;
     }
 
@@ -985,8 +1223,28 @@ async function enqueueAnalyzePosts(posts) {
     );
 
     if (!gate.pass) {
+      droppedByKeywordGate += 1;
+      logSw("queue.post_dropped_keyword_gate", summarizePostForLog(item, {
+        pass_reason: String(gate.pass_reason || "none"),
+        anchor_hits: gate.anchor_hits,
+        strong_hits: gate.strong_generic_hits,
+        weak_hits: gate.weak_generic_hits,
+        matched_keywords_preview: Array.isArray(gate.matched_keywords)
+          ? gate.matched_keywords.slice(0, 8)
+          : [],
+      }));
       continue;
     }
+
+    logSw("queue.post_accepted", summarizePostForLog(item, {
+      pass_reason: String(gate.pass_reason || "none"),
+      anchor_hits: gate.anchor_hits,
+      strong_hits: gate.strong_generic_hits,
+      weak_hits: gate.weak_generic_hits,
+      matched_keywords_preview: Array.isArray(gate.matched_keywords)
+        ? gate.matched_keywords.slice(0, 8)
+        : [],
+    }));
 
     normalizedPosts.push({
       ...item,
@@ -994,6 +1252,7 @@ async function enqueueAnalyzePosts(posts) {
       keyword_gate_anchor_hits: gate.anchor_hits,
       keyword_gate_strong_hits: gate.strong_generic_hits,
       keyword_gate_weak_hits: gate.weak_generic_hits,
+        keyword_gate_pass_reason: String(gate.pass_reason || "none"),
       keywords_matched_local: uniqueItems([
         ...(Array.isArray(item.keywords_matched_local) ? item.keywords_matched_local : []),
         ...gate.matched_keywords,
@@ -1001,11 +1260,24 @@ async function enqueueAnalyzePosts(posts) {
     });
   }
 
+  if (acceptedBySearchOverride > 0) {
+    logSw("queue.search_override_accepted", {
+      accepted: acceptedBySearchOverride,
+      received: inputPosts.length,
+    });
+  }
+
+  if (droppedByKeywordGate > 0) {
+    logSw("queue.keyword_gate_dropped", { dropped: droppedByKeywordGate, received: inputPosts.length });
+  }
+
   if (!normalizedPosts.length) {
+    logSw("queue.no_posts_after_keyword_gate", { received: inputPosts.length });
     return 0;
   }
 
   analyzeQueue.push(normalizedPosts);
+  logSw("queue.enqueued", { batch_posts: normalizedPosts.length, queue_length: analyzeQueue.length });
   processAnalyzeQueue().catch((error) => {
     console.error("analyze queue worker crashed", error);
   });
@@ -1128,13 +1400,19 @@ async function injectContentScript(tabId) {
 }
 
 async function manualScanActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  // Use lastFocusedWindow so the popup opening its own window doesn't hide the Facebook tab.
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tabs.length || !tabs[0].id) {
     return { ok: false, error: "No active tab" };
   }
 
   const activeTab = tabs[0];
   const tabId = activeTab.id;
+
+  logSw("manual_scan.request", {
+    tab_id: tabId,
+    tab_url: activeTab.url || "",
+  });
 
   if (!isFacebookGroupUrl(activeTab.url)) {
     return {
@@ -1145,6 +1423,8 @@ async function manualScanActiveTab() {
 
   const firstAttempt = await sendTabActionMessage(tabId, { action: "manual_scan" });
   if (firstAttempt.ok) {
+    logSw("manual_scan.first_attempt_ok", firstAttempt.response || {});
+    logManualScanDebug(firstAttempt.response || {});
     return { ok: true, ...(firstAttempt.response || {}) };
   }
 
@@ -1166,6 +1446,8 @@ async function manualScanActiveTab() {
 
   const secondAttempt = await sendTabActionMessage(tabId, { action: "manual_scan" });
   if (secondAttempt.ok) {
+    logSw("manual_scan.second_attempt_ok", secondAttempt.response || {});
+    logManualScanDebug(secondAttempt.response || {});
     return { ok: true, ...(secondAttempt.response || {}) };
   }
 
@@ -1176,7 +1458,8 @@ async function manualScanActiveTab() {
 }
 
 async function sendActionToActiveFacebookGroup(messagePayload) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  // Use lastFocusedWindow so the popup opening its own window doesn't hide the Facebook tab.
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tabs.length || !tabs[0].id) {
     return { ok: false, error: "No active tab" };
   }
@@ -1271,6 +1554,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       await ensureStorageDefaults();
 
+      if (message && message.action) {
+        const logDecision = shouldLogMessageReceived(message.action);
+        if (logDecision.log) {
+          logSw("message.received", {
+            action: message.action,
+            from_tab_id: sender && sender.tab ? sender.tab.id : null,
+            from_tab_url: sender && sender.tab ? (sender.tab.url || "") : "",
+            from_context: sender && sender.tab ? "content_script" : "extension_page",
+            posts_count: Array.isArray(message.posts) ? message.posts.length : undefined,
+            suppressed_since_last_log: logDecision.suppressed,
+          });
+        }
+      }
+
       switch (message.action) {
         case "analyze_posts": {
           const queued = await enqueueAnalyzePosts(message.posts || []);
@@ -1314,18 +1611,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case "auto_scroll_start": {
           const response = await startAutoScrollActiveTab();
+          logSw("auto_scroll.start_result", {
+            ok: Boolean(response && response.ok),
+            error: response && response.ok === false ? String(response.error || "") : "",
+            running: Boolean(response && response.status && response.status.running),
+            steps: Number(response && response.status ? response.status.steps || 0 : 0),
+            last_reason: String(response && response.status ? response.status.last_reason || "" : ""),
+          });
           sendResponse(response);
           return;
         }
 
         case "auto_scroll_stop": {
           const response = await stopAutoScrollActiveTab();
+          logSw("auto_scroll.stop_result", {
+            ok: Boolean(response && response.ok),
+            error: response && response.ok === false ? String(response.error || "") : "",
+            running: Boolean(response && response.status && response.status.running),
+            steps: Number(response && response.status ? response.status.steps || 0 : 0),
+            last_reason: String(response && response.status ? response.status.last_reason || "" : ""),
+          });
           sendResponse(response);
           return;
         }
 
         case "auto_scroll_status": {
           const response = await getAutoScrollStatusActiveTab();
+          if (response && response.ok === false) {
+            logSw("auto_scroll.status_error", {
+              error: String(response.error || ""),
+            });
+          }
           sendResponse(response);
           return;
         }
