@@ -9,13 +9,11 @@
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <div>
-          <h1 id="clientName">Client non configure</h1>
-          <p class="status-line">
-            <span id="statusDot" class="status-dot status-active"></span>
-            <span id="statusText">Actif</span>
-          </p>
-        </div>
+        <h1 id="clientName">Client non configure</h1>
+        <p class="status-line">
+          <span id="statusDot" class="status-dot status-active"></span>
+          <span id="statusText">Actif</span>
+        </p>
       </header>
 
       <nav class="tabs" aria-label="Popup tabs">
@@ -25,15 +23,24 @@
       </nav>
 
       <section id="tab-alerts" class="tab-panel active">
-        <div class="filters" role="group" aria-label="Sentiment filters">
-          <button class="filter-button active" data-filter="all" type="button">Tous</button>
-          <button class="filter-button" data-filter="very_negative" type="button">Tres negatif</button>
-          <button class="filter-button" data-filter="negative" type="button">Negatif</button>
-          <button class="filter-button" data-filter="neutral" type="button">Neutre</button>
+        <div class="alerts-toolbar">
+          <div class="filters" role="group" aria-label="Sentiment filters">
+            <button class="filter-button active" data-filter="all" type="button">Tous</button>
+            <button class="filter-button" data-filter="very_negative" type="button">Tres neg.</button>
+            <button class="filter-button" data-filter="negative" type="button">Negatif</button>
+            <button class="filter-button" data-filter="neutral" type="button">Neutre</button>
+          </div>
+          <button id="clearAlertsBtn" class="clear-btn" type="button" title="Effacer toutes les alertes">Effacer</button>
         </div>
 
-        <div id="alertsList" class="alerts-list"></div>
-        <div id="emptyState" class="empty-state hidden">Aucune alerte - surveillance active</div>
+        <div class="alerts-list-wrap">
+          <div id="alertsList" class="alerts-list"></div>
+          <div id="emptyState" class="empty-state hidden">
+            <span class="empty-state-icon">◎</span>
+            <span>Aucune alerte — surveillance active</span>
+          </div>
+          <button id="scrollTopBtn" class="scroll-top-btn" type="button" title="Revenir en haut">↑</button>
+        </div>
       </section>
 
       <section id="tab-config" class="tab-panel">
@@ -84,43 +91,63 @@
       </section>
 
       <section id="tab-stats" class="tab-panel">
-        <div class="stats-grid">
-          <article class="stat-card">
-            <p class="stat-label">Posts analyzes today</p>
-            <p id="totalToday" class="stat-value">0</p>
-          </article>
+        <div class="stats-content">
+          <div class="stats-grid">
+            <article class="stat-card">
+              <p class="stat-label">Posts analyzes today</p>
+              <p id="totalToday" class="stat-value">0</p>
+            </article>
 
-          <article class="stat-card">
-            <p class="stat-label">Tres negatif</p>
-            <p id="countVeryNegative" class="stat-value tone-very-negative">0</p>
-            <div class="mini-bar"><span id="barVeryNegative"></span></div>
-          </article>
+            <article class="stat-card">
+              <p class="stat-label">Tres negatif</p>
+              <p id="countVeryNegative" class="stat-value tone-very-negative">0</p>
+              <div class="mini-bar"><span id="barVeryNegative"></span></div>
+            </article>
 
-          <article class="stat-card">
-            <p class="stat-label">Negatif</p>
-            <p id="countNegative" class="stat-value tone-negative">0</p>
-            <div class="mini-bar"><span id="barNegative"></span></div>
-          </article>
+            <article class="stat-card">
+              <p class="stat-label">Negatif</p>
+              <p id="countNegative" class="stat-value tone-negative">0</p>
+              <div class="mini-bar"><span id="barNegative"></span></div>
+            </article>
 
-          <article class="stat-card">
-            <p class="stat-label">Neutre</p>
-            <p id="countNeutral" class="stat-value tone-neutral">0</p>
-            <div class="mini-bar"><span id="barNeutral"></span></div>
-          </article>
+            <article class="stat-card">
+              <p class="stat-label">Neutre</p>
+              <p id="countNeutral" class="stat-value tone-neutral">0</p>
+              <div class="mini-bar"><span id="barNeutral"></span></div>
+            </article>
 
-          <article class="stat-card">
-            <p class="stat-label">Positif</p>
-            <p id="countPositive" class="stat-value tone-positive">0</p>
-            <div class="mini-bar"><span id="barPositive"></span></div>
-          </article>
+            <article class="stat-card">
+              <p class="stat-label">Positif</p>
+              <p id="countPositive" class="stat-value tone-positive">0</p>
+              <div class="mini-bar"><span id="barPositive"></span></div>
+            </article>
+          </div>
+
+          <p class="last-scan">
+            Last scan: <span id="lastScanText">Never</span>
+          </p>
+
+          <button id="manualScanButton" class="primary-button" type="button">Scanner maintenant</button>
+
+          <div class="auto-scroll-block">
+            <p class="auto-scroll-status">
+              Auto-scroll: <span id="autoScrollStatusText">Inactif</span>
+            </p>
+            <div class="auto-scroll-actions">
+              <button id="autoScrollStartButton" class="secondary-button" type="button">Start auto-scroll</button>
+              <button id="autoScrollStopButton" class="secondary-button" type="button">Stop auto-scroll</button>
+            </div>
+          </div>
+
+          <div class="groups-block">
+            <div class="groups-head">
+              <p class="groups-title">Groupes pertinents surveilles</p>
+              <span id="relevantGroupsCount" class="groups-count">0</span>
+            </div>
+            <div id="relevantGroupsList" class="groups-list"></div>
+            <p id="relevantGroupsEmpty" class="groups-empty hidden">Aucun groupe pertinent disponible.</p>
+          </div>
         </div>
-
-        <p class="last-scan">
-          Last scan:
-          <span id="lastScanText">Never</span>
-        </p>
-
-        <button id="manualScanButton" class="primary-button" type="button">Scanner maintenant</button>
       </section>
 
       <footer class="footer-status">

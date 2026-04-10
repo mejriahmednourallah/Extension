@@ -3,6 +3,7 @@ const STORAGE_KEYS = {
   unreadCount: "unread_count",
   config: "config",
   lastScan: "last_scan",
+  dailyMetrics: "daily_metrics",
   installationId: "installation_id",
   groups: "groups",
   groupsSyncedAt: "groups_synced_at",
@@ -110,6 +111,44 @@ let analyzeWorkerRunning = false;
 const backendHealthyUntilByUrl = new Map();
 const groupsSyncedUntilByUrl = new Map();
 const extensionStateSyncedUntilByUrl = new Map();
+
+function getTodayKey() {
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function buildEmptyDailyMetrics(dateKey = getTodayKey()) {
+  return {
+    date: dateKey,
+    total_posts: 0,
+    very_negative: 0,
+    negative: 0,
+    neutral: 0,
+    positive: 0
+  };
+}
+
+function normalizeDailyMetrics(rawValue) {
+  const today = getTodayKey();
+  const value = rawValue && typeof rawValue === "object" ? rawValue : {};
+  const date = String(value.date || "");
+
+  if (date !== today) {
+    return buildEmptyDailyMetrics(today);
+  }
+
+  return {
+    date: today,
+    total_posts: Math.max(0, Number(value.total_posts || 0)),
+    very_negative: Math.max(0, Number(value.very_negative || 0)),
+    negative: Math.max(0, Number(value.negative || 0)),
+    neutral: Math.max(0, Number(value.neutral || 0)),
+    positive: Math.max(0, Number(value.positive || 0))
+  };
+}
 
 function storageGet(keys) {
   return new Promise((resolve) => {
@@ -450,6 +489,7 @@ async function ensureStorageDefaults() {
     STORAGE_KEYS.alerts,
     STORAGE_KEYS.unreadCount,
     STORAGE_KEYS.config,
+    STORAGE_KEYS.dailyMetrics,
     STORAGE_KEYS.installationId,
     STORAGE_KEYS.groups
   ]);
@@ -464,6 +504,8 @@ async function ensureStorageDefaults() {
   if (!Array.isArray(state[STORAGE_KEYS.groups])) {
     updates[STORAGE_KEYS.groups] = [];
   }
+
+  updates[STORAGE_KEYS.dailyMetrics] = normalizeDailyMetrics(state[STORAGE_KEYS.dailyMetrics]);
 
   const storedConfig = state[STORAGE_KEYS.config] || {};
   const config = { ...DEFAULT_CONFIG, ...storedConfig };
@@ -605,10 +647,19 @@ async function handleAnalyzePosts(posts) {
     newEntries.push(buildAlertEntry(post, result));
   }
 
-  const state = await storageGet([STORAGE_KEYS.alerts]);
+  const state = await storageGet([STORAGE_KEYS.alerts, STORAGE_KEYS.dailyMetrics]);
   const existingAlerts = Array.isArray(state[STORAGE_KEYS.alerts])
     ? state[STORAGE_KEYS.alerts]
     : [];
+  const dailyMetrics = normalizeDailyMetrics(state[STORAGE_KEYS.dailyMetrics]);
+
+  dailyMetrics.total_posts += Math.max(0, results.length);
+  for (const result of results) {
+    const sentiment = String(result && result.sentiment ? result.sentiment : "neutral").toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(dailyMetrics, sentiment)) {
+      dailyMetrics[sentiment] += 1;
+    }
+  }
 
   const mergedAlerts = [...newEntries, ...existingAlerts]
     .filter((item, index, arr) => arr.findIndex((entry) => entry.id === item.id) === index)
@@ -619,7 +670,8 @@ async function handleAnalyzePosts(posts) {
   await storageSet({
     [STORAGE_KEYS.alerts]: mergedAlerts,
     [STORAGE_KEYS.unreadCount]: unreadCount,
-    [STORAGE_KEYS.lastScan]: new Date().toISOString()
+    [STORAGE_KEYS.lastScan]: new Date().toISOString(),
+    [STORAGE_KEYS.dailyMetrics]: dailyMetrics
   });
 
   await updateBadge(unreadCount);
@@ -695,14 +747,18 @@ async function getState() {
     STORAGE_KEYS.alerts,
     STORAGE_KEYS.unreadCount,
     STORAGE_KEYS.config,
-    STORAGE_KEYS.lastScan
+    STORAGE_KEYS.lastScan,
+    STORAGE_KEYS.dailyMetrics,
+    STORAGE_KEYS.groups
   ]);
 
   return {
     alerts: Array.isArray(state[STORAGE_KEYS.alerts]) ? state[STORAGE_KEYS.alerts] : [],
     unread_count: Number(state[STORAGE_KEYS.unreadCount] || 0),
     config: { ...DEFAULT_CONFIG, ...(state[STORAGE_KEYS.config] || {}) },
-    last_scan: state[STORAGE_KEYS.lastScan] || null
+    last_scan: state[STORAGE_KEYS.lastScan] || null,
+    daily_metrics: normalizeDailyMetrics(state[STORAGE_KEYS.dailyMetrics]),
+    groups: Array.isArray(state[STORAGE_KEYS.groups]) ? state[STORAGE_KEYS.groups] : []
   };
 }
 
@@ -747,9 +803,9 @@ function isFacebookGroupUrl(url) {
   return /^https:\/\/(www|web|m)\.facebook\.com\/groups\//i.test(String(url || ""));
 }
 
-function sendManualScanMessage(tabId) {
+function sendTabActionMessage(tabId, payload) {
   return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, { action: "manual_scan" }, (response) => {
+    chrome.tabs.sendMessage(tabId, payload, (response) => {
       if (chrome.runtime.lastError) {
         resolve({ ok: false, error: chrome.runtime.lastError.message || "Unknown runtime error" });
         return;
@@ -793,7 +849,7 @@ async function manualScanActiveTab() {
     };
   }
 
-  const firstAttempt = await sendManualScanMessage(tabId);
+  const firstAttempt = await sendTabActionMessage(tabId, { action: "manual_scan" });
   if (firstAttempt.ok) {
     return { ok: true, ...(firstAttempt.response || {}) };
   }
@@ -814,7 +870,7 @@ async function manualScanActiveTab() {
     };
   }
 
-  const secondAttempt = await sendManualScanMessage(tabId);
+  const secondAttempt = await sendTabActionMessage(tabId, { action: "manual_scan" });
   if (secondAttempt.ok) {
     return { ok: true, ...(secondAttempt.response || {}) };
   }
@@ -823,6 +879,79 @@ async function manualScanActiveTab() {
     ok: false,
     error: secondAttempt.error || "Could not connect to page context. Reload tab and retry."
   };
+}
+
+async function sendActionToActiveFacebookGroup(messagePayload) {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs.length || !tabs[0].id) {
+    return { ok: false, error: "No active tab" };
+  }
+
+  const activeTab = tabs[0];
+  const tabId = activeTab.id;
+
+  if (!isFacebookGroupUrl(activeTab.url)) {
+    return {
+      ok: false,
+      error: "Open a Facebook group page first (www/web/m.facebook.com/groups/...)"
+    };
+  }
+
+  const firstAttempt = await sendTabActionMessage(tabId, messagePayload);
+  if (firstAttempt.ok) {
+    return { ok: true, ...(firstAttempt.response || {}) };
+  }
+
+  const missingReceiver = /receiving end does not exist|could not establish connection/i.test(
+    firstAttempt.error || ""
+  );
+
+  if (!missingReceiver) {
+    return { ok: false, error: firstAttempt.error };
+  }
+
+  const injected = await injectContentScript(tabId);
+  if (!injected) {
+    return {
+      ok: false,
+      error: "Content script not ready. Reload the Facebook tab and retry."
+    };
+  }
+
+  const secondAttempt = await sendTabActionMessage(tabId, messagePayload);
+  if (secondAttempt.ok) {
+    return { ok: true, ...(secondAttempt.response || {}) };
+  }
+
+  return {
+    ok: false,
+    error: secondAttempt.error || "Could not connect to page context. Reload tab and retry."
+  };
+}
+
+async function startAutoScrollActiveTab() {
+  const state = await getState();
+  const autoScrollConfig = {
+    interval_ms: 1300,
+    step_min_px: 450,
+    step_max_px: 900,
+    max_steps_per_run: 45,
+    max_idle_rounds: 6,
+    ...(state.config && state.config.auto_scroll_config ? state.config.auto_scroll_config : {})
+  };
+
+  return sendActionToActiveFacebookGroup({
+    action: "auto_scroll_start",
+    config: autoScrollConfig
+  });
+}
+
+async function stopAutoScrollActiveTab() {
+  return sendActionToActiveFacebookGroup({ action: "auto_scroll_stop" });
+}
+
+async function getAutoScrollStatusActiveTab() {
+  return sendActionToActiveFacebookGroup({ action: "auto_scroll_status" });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -873,8 +1002,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
+        case "clear_alerts": {
+          await storageSet({
+            [STORAGE_KEYS.alerts]: [],
+            [STORAGE_KEYS.unreadCount]: 0
+          });
+          await updateBadge(0);
+          sendResponse({ ok: true });
+          return;
+        }
+
         case "manual_scan_active_tab": {
           const response = await manualScanActiveTab();
+          sendResponse(response);
+          return;
+        }
+
+        case "auto_scroll_start": {
+          const response = await startAutoScrollActiveTab();
+          sendResponse(response);
+          return;
+        }
+
+        case "auto_scroll_stop": {
+          const response = await stopAutoScrollActiveTab();
+          sendResponse(response);
+          return;
+        }
+
+        case "auto_scroll_status": {
+          const response = await getAutoScrollStatusActiveTab();
           sendResponse(response);
           return;
         }

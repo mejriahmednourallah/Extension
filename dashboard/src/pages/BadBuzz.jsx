@@ -8,6 +8,7 @@ export default function BadBuzz() {
   const [filter, setFilter] = useState('all');
   const [sortBy, setSortBy] = useState('priority');
   const [loading, setLoading] = useState(true);
+  const [expandedSuggestions, setExpandedSuggestions] = useState({});
 
   useEffect(() => {
     fetchAlerts();
@@ -39,6 +40,13 @@ export default function BadBuzz() {
   const handleCopyResponse = (text) => {
     navigator.clipboard.writeText(text);
     alert('Réponse copiée au presse-papiers!');
+  };
+
+  const toggleSuggestion = (key) => {
+    setExpandedSuggestions((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
   };
 
   return (
@@ -158,25 +166,47 @@ export default function BadBuzz() {
                 <div className="bb-responses">
                   {responses.map((responseText, index) => (
                     <div className="resp-card" key={`${alert.id}-resp-${index}`}>
-                      <div className="resp-head">
-                        <span className={`strat-pill ${useFallbackResponses ? (index === 0 ? 'sp-esc' : 'sp-emp') : 'sp-emp'}`}>
-                          {useFallbackResponses
-                            ? (index === 0 ? 'Template escalation' : 'Template empathique')
-                            : `Suggestion IA ${index + 1}`}
-                        </span>
-                        <button
-                          className="copy-btn"
-                          onClick={() => handleCopyResponse(responseText)}
-                        >
-                          Copier
-                        </button>
-                      </div>
-                      <div className="resp-text">{responseText}</div>
-                      <div className="resp-why">
-                        {useFallbackResponses
-                          ? 'Template local utilise car aucune suggestion LLM n\'a ete retournee.'
-                          : 'Suggestion generee et retournee par le backend LLM.'}
-                      </div>
+                      {(() => {
+                        const suggestionKey = `${alert.id}-resp-${index}`;
+                        const isExpanded = Boolean(expandedSuggestions[suggestionKey]);
+                        const canExpand = String(responseText || '').length > 190;
+                        const previewText = canExpand && !isExpanded
+                          ? `${String(responseText).slice(0, 190)}...`
+                          : responseText;
+
+                        return (
+                          <>
+                            <div className="resp-head">
+                              <span className={`strat-pill ${useFallbackResponses ? (index === 0 ? 'sp-esc' : 'sp-emp') : 'sp-emp'}`}>
+                                {useFallbackResponses
+                                  ? (index === 0 ? 'Template escalation' : 'Template empathique')
+                                  : `Suggestion IA ${index + 1}`}
+                              </span>
+                              <button
+                                className="copy-btn"
+                                onClick={() => handleCopyResponse(responseText)}
+                              >
+                                Copier
+                              </button>
+                            </div>
+                            <div className="resp-text">{previewText}</div>
+                            {canExpand && (
+                              <button
+                                type="button"
+                                className="resp-toggle"
+                                onClick={() => toggleSuggestion(suggestionKey)}
+                              >
+                                {isExpanded ? 'Voir moins' : 'Voir plus'}
+                              </button>
+                            )}
+                            <div className="resp-why">
+                              {useFallbackResponses
+                                ? 'Template local utilise car aucune suggestion LLM n\'a ete retournee.'
+                                : 'Suggestion generee et retournee par le backend LLM.'}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>

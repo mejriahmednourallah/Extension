@@ -517,6 +517,21 @@ header {
   color: var(--text);
 }
 
+.resp-toggle {
+  margin-top: 8px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+
+.resp-toggle:hover {
+  text-decoration: underline;
+}
+
 .resp-why {
   margin-top: 6px;
   font-size: 12px;

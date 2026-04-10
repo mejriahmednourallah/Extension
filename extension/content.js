@@ -1,3 +1,10 @@
+(() => {
+if (globalThis.__ereputationWatcherContentLoaded) {
+  return;
+}
+
+globalThis.__ereputationWatcherContentLoaded = true;
+
 const MIN_POST_LENGTH = 20;
 const SEND_INTERVAL_MS = 3000;
 
@@ -8,6 +15,26 @@ let observer = null;
 let autoScanEnabled = true;
 let sendTimer = null;
 let lastSentAt = 0;
+
+const AUTO_SCROLL_DEFAULTS = {
+  interval_ms: 1300,
+  step_min_px: 450,
+  step_max_px: 900,
+  max_steps_per_run: 45,
+  max_idle_rounds: 6
+};
+
+const autoScrollState = {
+  running: false,
+  timer: null,
+  steps: 0,
+  idleRounds: 0,
+  newPosts: 0,
+  lastReason: "not_started",
+  startedAt: null,
+  stoppedAt: null,
+  config: { ...AUTO_SCROLL_DEFAULTS }
+};
 
 function normalizeWhitespace(value) {
   return String(value || "")
@@ -259,6 +286,147 @@ function scheduleSend() {
   }, delay);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomInt(min, max) {
+  const low = Math.min(min, max);
+  const high = Math.max(min, max);
+  return Math.floor(Math.random() * (high - low + 1)) + low;
+}
+
+function getScrollHeight() {
+  const bodyHeight = document.body ? document.body.scrollHeight : 0;
+  const docHeight = document.documentElement ? document.documentElement.scrollHeight : 0;
+  return Math.max(bodyHeight, docHeight, window.innerHeight || 0);
+}
+
+function normalizeAutoScrollConfig(config) {
+  const source = config && typeof config === "object" ? config : {};
+  const interval = Number(source.interval_ms);
+  const stepMin = Number(source.step_min_px);
+  const stepMax = Number(source.step_max_px);
+  const maxSteps = Number(source.max_steps_per_run);
+  const maxIdle = Number(source.max_idle_rounds);
+
+  return {
+    interval_ms: Number.isFinite(interval) ? Math.max(400, Math.min(5000, Math.round(interval))) : AUTO_SCROLL_DEFAULTS.interval_ms,
+    step_min_px: Number.isFinite(stepMin) ? Math.max(100, Math.min(3000, Math.round(stepMin))) : AUTO_SCROLL_DEFAULTS.step_min_px,
+    step_max_px: Number.isFinite(stepMax) ? Math.max(150, Math.min(3500, Math.round(stepMax))) : AUTO_SCROLL_DEFAULTS.step_max_px,
+    max_steps_per_run: Number.isFinite(maxSteps) ? Math.max(5, Math.min(300, Math.round(maxSteps))) : AUTO_SCROLL_DEFAULTS.max_steps_per_run,
+    max_idle_rounds: Number.isFinite(maxIdle) ? Math.max(2, Math.min(30, Math.round(maxIdle))) : AUTO_SCROLL_DEFAULTS.max_idle_rounds
+  };
+}
+
+function getAutoScrollStatus() {
+  return {
+    running: autoScrollState.running,
+    steps: autoScrollState.steps,
+    idle_rounds: autoScrollState.idleRounds,
+    new_posts: autoScrollState.newPosts,
+    last_reason: autoScrollState.lastReason,
+    started_at: autoScrollState.startedAt,
+    stopped_at: autoScrollState.stoppedAt,
+    config: { ...autoScrollState.config }
+  };
+}
+
+function stopAutoScroller(reason = "stopped") {
+  if (autoScrollState.timer) {
+    clearTimeout(autoScrollState.timer);
+    autoScrollState.timer = null;
+  }
+
+  autoScrollState.running = false;
+  autoScrollState.lastReason = reason;
+  autoScrollState.stoppedAt = new Date().toISOString();
+  return getAutoScrollStatus();
+}
+
+function scheduleAutoScrollTick(delayMs) {
+  if (!autoScrollState.running) {
+    return;
+  }
+
+  if (autoScrollState.timer) {
+    clearTimeout(autoScrollState.timer);
+  }
+
+  autoScrollState.timer = setTimeout(() => {
+    autoScrollState.timer = null;
+    runAutoScrollTick().catch((error) => {
+      console.warn("Auto-scroller failed:", error);
+      stopAutoScroller("error");
+    });
+  }, delayMs);
+}
+
+async function runAutoScrollTick() {
+  if (!autoScrollState.running) {
+    return;
+  }
+
+  const config = autoScrollState.config;
+  const beforeHeight = getScrollHeight();
+  const beforeY = Math.max(0, Math.round(window.scrollY || 0));
+  const scrollStep = randomInt(config.step_min_px, config.step_max_px);
+
+  window.scrollBy({ top: scrollStep, left: 0, behavior: "smooth" });
+  await delay(config.interval_ms);
+
+  const discoveredPosts = extractPostsFromPage(document.body);
+  if (discoveredPosts.length) {
+    autoScrollState.newPosts += discoveredPosts.length;
+    queuePosts(discoveredPosts);
+  }
+
+  const afterHeight = getScrollHeight();
+  const afterY = Math.max(0, Math.round(window.scrollY || 0));
+  const atBottom = afterY + window.innerHeight >= afterHeight - 8;
+  const progressed = discoveredPosts.length > 0 || afterHeight > beforeHeight || afterY > beforeY;
+
+  autoScrollState.steps += 1;
+  autoScrollState.idleRounds = progressed && !atBottom ? 0 : autoScrollState.idleRounds + 1;
+
+  if (autoScrollState.steps >= config.max_steps_per_run) {
+    stopAutoScroller("max_steps_reached");
+    return;
+  }
+
+  if (autoScrollState.idleRounds >= config.max_idle_rounds) {
+    stopAutoScroller(atBottom ? "end_of_feed" : "idle_limit_reached");
+    return;
+  }
+
+  const jitter = randomInt(120, 260);
+  scheduleAutoScrollTick(config.interval_ms + jitter);
+}
+
+function startAutoScroller(config) {
+  if (autoScrollState.running) {
+    return getAutoScrollStatus();
+  }
+
+  autoScrollState.config = normalizeAutoScrollConfig(config);
+  autoScrollState.running = true;
+  autoScrollState.steps = 0;
+  autoScrollState.idleRounds = 0;
+  autoScrollState.newPosts = 0;
+  autoScrollState.lastReason = "running";
+  autoScrollState.startedAt = new Date().toISOString();
+  autoScrollState.stoppedAt = null;
+
+  const initialPosts = extractPostsFromPage(document.body);
+  if (initialPosts.length) {
+    autoScrollState.newPosts += initialPosts.length;
+    queuePosts(initialPosts);
+  }
+
+  scheduleAutoScrollTick(250);
+  return getAutoScrollStatus();
+}
+
 function queuePosts(posts) {
   for (const post of posts) {
     if (!post || !post.id || queuedPostsById.has(post.id)) {
@@ -356,6 +524,7 @@ function applyAutoScan(enabled) {
       queuePosts(initialPosts);
     }
   } else {
+    stopAutoScroller("auto_scan_disabled");
     stopObserver();
   }
 }
@@ -377,16 +546,37 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action !== "manual_scan") {
+  if (!message || !message.action) {
     return false;
   }
 
-  const posts = extractPostsFromPage(document.body);
-  if (posts.length) {
-    queuePosts(posts);
+  if (message.action === "manual_scan") {
+    const posts = extractPostsFromPage(document.body);
+    if (posts.length) {
+      queuePosts(posts);
+    }
+    sendResponse({ count: posts.length });
+    return true;
   }
-  sendResponse({ count: posts.length });
-  return true;
+
+  if (message.action === "auto_scroll_start") {
+    const status = startAutoScroller(message.config || {});
+    sendResponse({ ok: true, status });
+    return true;
+  }
+
+  if (message.action === "auto_scroll_stop") {
+    const status = stopAutoScroller("stopped_by_user");
+    sendResponse({ ok: true, status });
+    return true;
+  }
+
+  if (message.action === "auto_scroll_status") {
+    sendResponse({ ok: true, status: getAutoScrollStatus() });
+    return true;
+  }
+
+  return false;
 });
 
 if (document.readyState === "loading") {
@@ -394,3 +584,5 @@ if (document.readyState === "loading") {
 } else {
   loadAutoScanSetting();
 }
+
+})();
