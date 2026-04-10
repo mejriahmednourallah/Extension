@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import re
-from threading import Lock
 from typing import Any
 
 import google.generativeai as genai
@@ -51,8 +50,6 @@ _GROQ_FALLBACK_EXCEPTIONS = (
 )
 
 _PROVIDER_SEQUENCE = ("gemini", "groq")
-_PROVIDER_ROTATION_LOCK = Lock()
-_provider_rotation_index = 0
 
 
 def build_prompt(post_text: str, client_name: str, keywords: list[str]) -> str:
@@ -191,22 +188,12 @@ def _build_key_pool(primary_key: str, extra_keys: tuple[str, ...]) -> list[str]:
     return list(dict.fromkeys(filtered))
 
 
-def _next_provider_order() -> tuple[str, str]:
-    global _provider_rotation_index
-
-    with _PROVIDER_ROTATION_LOCK:
-        first = _PROVIDER_SEQUENCE[_provider_rotation_index]
-        _provider_rotation_index = (_provider_rotation_index + 1) % len(_PROVIDER_SEQUENCE)
-
-    second = "gemini" if first == "groq" else "groq"
-    return first, second
-
-
 async def call_groq(prompt: str, api_key: str) -> str:
     if not api_key:
         raise RuntimeError("Missing GROQ_API_KEY")
 
-    client = AsyncGroq(api_key=api_key)
+    # Disable Groq SDK automatic retries so provider fallback is handled by our own logic.
+    client = AsyncGroq(api_key=api_key, max_retries=0)
     response = await client.chat.completions.create(
         model=settings.groq_model,
         messages=[
@@ -339,7 +326,7 @@ async def analyze_post(post_text: str, client_name: str, keywords: list[str]) ->
 
     groq_keys = _build_key_pool(settings.groq_api_key, settings.groq_api_keys)
     gemini_keys = _build_key_pool(settings.gemini_api_key, settings.gemini_api_keys)
-    provider_order = _next_provider_order()
+    provider_order = _PROVIDER_SEQUENCE
 
     provider_errors: dict[str, Exception] = {}
 

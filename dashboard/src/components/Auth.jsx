@@ -24,12 +24,14 @@ export default function Auth({ onLogin }) {
       return;
     }
 
-    if (CREDENTIALS[username] === password) {
-      onLogin(username);
-      authStorage.saveAuth({ username });
+    const normalizedUsername = String(username || '').trim().toLowerCase();
+
+    if (CREDENTIALS[normalizedUsername] === password) {
+      onLogin(normalizedUsername);
+      authStorage.saveAuth({ username: normalizedUsername });
     } else {
       setError('Identifiants incorrects');
-      setTimeout(() => setError(''), 500);
+      setTimeout(() => setError(''), 2500);
     }
 
     setLoading(false);
@@ -44,25 +46,29 @@ export default function Auth({ onLogin }) {
           <p>Monitoring et pilotage</p>
         </div>
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} className="auth-form">
           <div className="form-field">
-            <label>Identifiant</label>
+            <label htmlFor="auth-username">Identifiant</label>
             <input
+              id="auth-username"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="admin, demo, client"
+              autoComplete="username"
               disabled={loading}
             />
           </div>
 
           <div className="form-field">
-            <label>Mot de passe</label>
+            <label htmlFor="auth-password">Mot de passe</label>
             <input
+              id="auth-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••"
+              autoComplete="current-password"
               disabled={loading}
             />
           </div>
@@ -75,10 +81,12 @@ export default function Auth({ onLogin }) {
         </form>
 
         <div className="auth-hint">
-          <strong>Comptes de demo:</strong>
-          <p>admin / admin123</p>
-          <p>demo / demo2024</p>
-          <p>client / client2024</p>
+          <strong>Comptes de demo</strong>
+          <ul>
+            <li>admin / admin123</li>
+            <li>demo / demo2024</li>
+            <li>client / client2024</li>
+          </ul>
         </div>
       </div>
     </div>
