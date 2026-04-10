@@ -1071,36 +1071,32 @@ function isElementScrollable(element) {
 }
 
 function findActiveScrollContainer() {
-  const candidates = [];
-  const scrollingElement = document.scrollingElement || document.documentElement || document.body;
-  if (scrollingElement) {
-    candidates.push(scrollingElement);
-  }
+  // Strategy 1: Facebook uses a specific scrollable div for the feed.
+  // Try to find the deepest scrollable element that contains the feed.
+  const feedSelectors = [
+    "[role='feed']",
+    "[role='main']",
+    "div[class*='feed']",
+    "div[data-pagelet='GroupFeed']",
+    "div[data-pagelet='SearchResults']",
+    "div[data-pagelet='HashtagFeed']"
+  ];
 
-  const feed = document.querySelector("[role='feed']");
-  if (feed instanceof Element) {
-    let current = feed;
-    for (let depth = 0; depth < 8 && current; depth += 1) {
-      candidates.unshift(current);
+  for (const sel of feedSelectors) {
+    const el = document.querySelector(sel);
+    if (!(el instanceof Element)) continue;
+    // Walk up from the feed to find its nearest scrollable ancestor
+    let current = el.parentElement;
+    for (let depth = 0; depth < 12 && current && current !== document.body; depth += 1) {
+      if (isElementScrollable(current)) {
+        return current;
+      }
       current = current.parentElement;
     }
   }
 
-  const main = document.querySelector("[role='main']");
-  if (main instanceof Element) {
-    candidates.push(main);
-  }
-
-  for (const candidate of candidates) {
-    if (candidate === document.body || candidate === document.documentElement || candidate === document.scrollingElement) {
-      continue;
-    }
-    if (isElementScrollable(candidate)) {
-      return candidate;
-    }
-  }
-
-  return scrollingElement;
+  // Strategy 2: Fall back to window-level scroll (works on most Facebook pages).
+  return document.scrollingElement || document.documentElement || document.body;
 }
 
 function getScrollMetrics(target = findActiveScrollContainer()) {
@@ -1132,23 +1128,30 @@ function getScrollMetrics(target = findActiveScrollContainer()) {
 function performScrollStep(target, scrollStep) {
   const element = target || findActiveScrollContainer();
   const isRootScroller =
+    !element ||
     element === window ||
     element === document.body ||
     element === document.documentElement ||
     element === document.scrollingElement;
 
   if (isRootScroller) {
+    // window.scrollBy is the most reliable way to scroll on Facebook group/search/hashtag pages.
+    window.scrollBy({ top: scrollStep, left: 0, behavior: 'instant' });
+    // Belt-and-suspenders: also set scrollTop directly on the root
     const root = document.scrollingElement || document.documentElement || document.body;
-    const nextTop = Math.max(0, (window.scrollY || root.scrollTop || 0) + scrollStep);
-    window.scrollTo({ top: nextTop, left: 0, behavior: "auto" });
-    root.scrollTop = nextTop;
-    if (document.body && document.body !== root) {
-      document.body.scrollTop = nextTop;
+    if (root) {
+      root.scrollTop = Math.max(0, (root.scrollTop || 0) + scrollStep);
     }
     return;
   }
 
+  // For nested scrollable containers (some Facebook variants)
+  const before = element.scrollTop;
   element.scrollTop = Math.max(0, Number(element.scrollTop || 0) + scrollStep);
+  // If the element didn't scroll (e.g. it's not truly scrollable), fall back to window
+  if (element.scrollTop === before) {
+    window.scrollBy({ top: scrollStep, left: 0, behavior: 'instant' });
+  }
 }
 
 function getScrollHeight() {
