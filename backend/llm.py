@@ -71,7 +71,7 @@ _PROVIDER_SEQUENCE = ("cerebras", "gemini", "groq", "openrouter")
 _DARIJA_NEGATIVE_SIGNALS: frozenset[str] = frozenset({
     # Darija core complaints
     "bloqui", "mbloki", "makhdoum", "matat3melch", "matkhdemch",
-    "ma3ndich", "m3andich", "m3ndich", "manajmch", "manajamch",
+    "ma3ndich", "m3andich", "m3ndich", "manajmch", "manajamch", "mane9derch",
     "msab", "khasretha", "5sretha", "5ostni", "5estni",
     "floussi", "flusi",
     "sra9a", "sra9", "sre9", "sra9ba", "sariqa", "sarqa",
@@ -89,6 +89,15 @@ _DARIJA_NEGATIVE_SIGNALS: frozenset[str] = frozenset({
     "mchklha", "mchouma", "hchouma",
     "khrota", "khrouta", "zelta",
     "gha9ra", "kh9er", "kh9ara",
+    # Last-resort churn / frustration signals
+    "no5rej mn andhm", "no5roj mn andhm", "nokhrej men andhom",
+    "nmchi l banka o5ra", "nmchi lel banka o5ra", "nemchi l banka okhra",
+    "mne5dmouch biha", "manekhdemch biha",
+    "talbin 3liya", "9alouli", "galouli",
+    "kifch enjm ntserf", "kifech nejem ntsarref", "kifesh najem ntsaraf",
+    "qdash y3tiwk", "9dash ya3tiwk", "qadash ya3tiwk",
+    "3la salaire", "ala salaire",
+    "wbch", "mte3hom", "rah 3liya",
     # French banking complaints
     "arnaque", "arnaquer", "voleur", "voleurs", "escroquerie", "escroc",
     "bloque", "refus", "refuse", "interdit", "gele", "suspendu",
@@ -105,6 +114,9 @@ _DARIJA_NEGATIVE_SIGNALS: frozenset[str] = frozenset({
     "\u0645\u0627\u062e\u062f\u062a\u0648\u0634", "\u0645\u0627\u0646\u062c\u0645\u062a\u0634",
     "\u062e\u0633\u0627\u0631\u0629", "\u0641\u0636\u064a\u062d\u0629", "\u0639\u064a\u0628", "\u062d\u0631\u0627\u0645",
     "\u0634\u0643\u0648\u0649", "\u0634\u0643\u0627\u0648\u0649", "\u062e\u062f\u0645\u0629 \u0633\u064a\u0626\u0629",
+    "\u0642\u062f\u0627\u0634 \u064a\u0639\u0637\u0648", "\u0642\u062f\u0627\u0634 \u064a\u0639\u0637\u064a\u0648\u0643",
+    "\u0645\u0627\u0643\u0633 \u0641\u064a \u0627\u0644\u0631\u0648\u062c",
+    "\u0648\u0628\u0634", "\u0645\u062a\u0627\u0639\u0647\u0645", "\u0631\u0627\u0647 \u0639\u0644\u064a\u0627",
 })
 
 _PRE_CLASSIFY_ANCHOR_THRESHOLD = 1
