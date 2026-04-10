@@ -34,7 +34,13 @@
       "matches": [
         "https://www.facebook.com/groups/*",
         "https://web.facebook.com/groups/*",
-        "https://m.facebook.com/groups/*"
+        "https://m.facebook.com/groups/*",
+        "https://www.facebook.com/search/*",
+        "https://web.facebook.com/search/*",
+        "https://m.facebook.com/search/*",
+        "https://www.facebook.com/hashtag/*",
+        "https://web.facebook.com/hashtag/*",
+        "https://m.facebook.com/hashtag/*"
       ],
       "js": [
         "content.js"

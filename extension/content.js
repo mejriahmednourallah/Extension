@@ -479,13 +479,64 @@ function stableHashFNV1a(value) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function buildPostId({ text, author, postUrl, groupUrl, timestamp }) {
+function extractCanonicalPostLocator(url) {
+  const value = String(url || "").trim();
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(value, window.location.origin);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const pathMatch = pathname.match(/\/groups\/([^/]+)\/posts\/([^/?#]+)/i);
+    if (pathMatch) {
+      return `groups/${pathMatch[1].toLowerCase()}/posts/${pathMatch[2].toLowerCase()}`;
+    }
+
+    const groupMatch = pathname.match(/\/groups\/([^/?#]+)/i);
+    const groupId = groupMatch ? String(groupMatch[1]).trim().toLowerCase() : "";
+    const postId =
+      parsed.searchParams.get("story_fbid") ||
+      parsed.searchParams.get("fbid") ||
+      parsed.searchParams.get("fb_id") ||
+      parsed.searchParams.get("v") ||
+      "";
+
+    if (postId) {
+      return groupId
+        ? `groups/${groupId}/post/${String(postId).trim().toLowerCase()}`
+        : `post/${String(postId).trim().toLowerCase()}`;
+    }
+
+    if (groupId) {
+      return `groups/${groupId}${pathname.toLowerCase()}`;
+    }
+
+    return `${parsed.origin.toLowerCase()}${pathname.toLowerCase()}`;
+  } catch (_) {
+    const normalized = value.replace(/\/+$/, "").toLowerCase();
+    const pathMatch = normalized.match(/\/groups\/([^/]+)\/posts\/([^/?#]+)/i);
+    if (pathMatch) {
+      return `groups/${pathMatch[1]}/posts/${pathMatch[2]}`;
+    }
+
+    const fbidMatch = normalized.match(/[?&](?:story_fbid|fbid|fb_id|v)=([^&#]+)/i);
+    const groupMatch = normalized.match(/\/groups\/([^/?#]+)/i);
+    if (fbidMatch && groupMatch) {
+      return `groups/${groupMatch[1]}/post/${fbidMatch[1]}`;
+    }
+
+    return normalized;
+  }
+}
+
+function buildPostId({ text, author, postUrl, canonicalPostLocator }) {
+  const stablePostUrl = canonicalPostLocator ? normalizeWhitespace(postUrl || "") : "";
   const payload = [
     cleanText(author || ""),
     cleanText(text || ""),
-    normalizeWhitespace(postUrl || ""),
-    normalizeWhitespace(groupUrl || ""),
-    normalizeWhitespace(timestamp || "")
+    normalizeWhitespace(canonicalPostLocator || ""),
+    stablePostUrl
   ].join("\n");
 
   const primaryHash = stableHashFNV1a(payload);
@@ -576,32 +627,105 @@ function extractTimestampAndUrl(article) {
   const abbr = article.querySelector("a[role='link'] abbr");
   if (abbr) {
     const link = abbr.closest("a");
+    const postUrl = (link && link.href) || window.location.href;
     return {
       timestamp: cleanText(abbr.textContent),
-      post_url: (link && link.href) || window.location.href
+      post_url: postUrl,
+      canonical_post_locator: extractCanonicalPostLocator(postUrl)
     };
   }
 
-  const link = article.querySelector(
-    "a[href*='/posts/'], a[href*='permalink'], a[href*='/groups/']"
-  );
+  const postLinks = Array.from(article.querySelectorAll(POST_LINK_SELECTOR));
+  const rankedLink = postLinks
+    .map((link) => ({
+      link,
+      href: String(link && link.href || ""),
+    }))
+    .sort((left, right) => {
+      const scoreHref = (href) => {
+        if (/story_fbid=|[?&]fbid=|[?&]fb_id=|[?&]v=/i.test(href)) return 4;
+        if (/\/groups\/[^/]+\/posts\//i.test(href)) return 3;
+        if (/permalink/i.test(href)) return 2;
+        if (/\/posts\//i.test(href)) return 1;
+        return 0;
+      };
+
+      return scoreHref(right.href) - scoreHref(left.href);
+    })[0];
+
+  const link = rankedLink ? rankedLink.link : article.querySelector("a[href*='/groups/']");
+  const postUrl = (link && link.href) || window.location.href;
 
   return {
     timestamp: cleanText(link && link.textContent) || new Date().toISOString(),
-    post_url: (link && link.href) || window.location.href
+    post_url: postUrl,
+    canonical_post_locator: extractCanonicalPostLocator(postUrl)
   };
 }
 
+const WRAPPER_REVIEW_TEXT_LENGTH = 5000;
+const HARD_WRAPPER_TEXT_LENGTH = 25000;
+
+/**
+ * Remove Facebook page-chrome noise that bleeds into containers grabbed by
+ * nuclear fallback strategies. This keeps post IDs stable across scroll positions
+ * (virtual scrolling changes what's visible, altering innerText of large wrappers).
+ */
+function stripFacebookUINoise(text) {
+  return text
+    // Leading navigation bursts: "Facebook Facebook Facebook ..."
+    .replace(/^(\s*Facebook\s*){2,}/i, "")
+    // Trailing navigation bursts
+    .replace(/(\s*Facebook\s*){2,}$/i, "")
+    // Inline UI chrome: Like · Reply · Share buttons and notification counts
+    .replace(/\b(Like|Reply|Share|Comment|Voir plus|See more|J'aime|Commenter|Partager)\b[\s·•\d]*/gi, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function isLikelyWrapperContainer(article, rawText, searchResultsMode) {
+  const textLength = String(rawText || "").length;
+  if (textLength < WRAPPER_REVIEW_TEXT_LENGTH) {
+    return false;
+  }
+
+  const descendantArticles = article.querySelectorAll("div[role='article']").length;
+  const feedUnits = article.querySelectorAll("div[data-pagelet^='FeedUnit_']").length;
+  const postLinks = article.querySelectorAll(POST_LINK_SELECTOR).length;
+  const authorLinks = article.querySelectorAll("h2 a[role='link'], h3 a[role='link']").length;
+  const feedContainers = article.querySelectorAll("[role='feed']").length;
+
+  if (descendantArticles > 0 || feedUnits > 0 || feedContainers > 0) {
+    return true;
+  }
+
+  if (!searchResultsMode && (postLinks >= 3 || authorLinks >= 3)) {
+    return true;
+  }
+
+  return textLength >= HARD_WRAPPER_TEXT_LENGTH && (postLinks >= 2 || authorLinks >= 2);
+}
+
 function extractPostFromArticle(article) {
-  const text = cleanText(article.innerText || article.textContent || "");
+  const rawText = cleanText(article.innerText || article.textContent || "");
+  const currentPageUrl = window.location.href;
+  const searchQuery = getSearchQueryFromUrl(currentPageUrl);
+  const searchResultsMode = Boolean(searchQuery);
+
+  if (isLikelyWrapperContainer(article, rawText, searchResultsMode)) {
+    extractionDebug.dropped_short_text += 1; // reuse counter — close enough
+    return null;
+  }
+
+  // Strip Facebook navigation noise before any processing so the post ID
+  // is stable regardless of what page elements are visible at scroll time.
+  const text = stripFacebookUINoise(rawText);
+
   if (text.length < MIN_POST_LENGTH) {
     extractionDebug.dropped_short_text += 1;
     return null;
   }
 
-  const currentPageUrl = window.location.href;
-  const searchQuery = getSearchQueryFromUrl(currentPageUrl);
-  const searchResultsMode = Boolean(searchQuery);
   const keywordGate = evaluateKeywordGate(text, runtimeDetectionConfig);
   if (!keywordGate.pass && !searchResultsMode) {
     extractionDebug.dropped_keyword_gate += 1;
@@ -609,14 +733,17 @@ function extractPostFromArticle(article) {
   }
 
   const author = extractAuthor(article);
-  const { timestamp, post_url: postUrl } = extractTimestampAndUrl(article);
+  const {
+    timestamp,
+    post_url: postUrl,
+    canonical_post_locator: canonicalPostLocator,
+  } = extractTimestampAndUrl(article);
   const groupUrl = currentPageUrl;
   const postId = buildPostId({
     text,
     author,
     postUrl,
-    groupUrl,
-    timestamp
+    canonicalPostLocator
   });
 
   if (!postId || processedPostIds.has(postId)) {
@@ -658,11 +785,23 @@ function extractPostFromArticle(article) {
   return post;
 }
 
-// POST_LINK_SELECTOR matches any anchor that points to a Facebook post or permalink.
-const POST_LINK_SELECTOR = "a[href*='/posts/'], a[href*='/permalink/'], a[href*='story_fbid']";
+// POST_LINK_SELECTOR — covers the many URL formats Facebook uses for post links.
+// Facebook search results often use ?fbid= or ?id= instead of /posts/ paths.
+const POST_LINK_SELECTOR = [
+  "a[href*='/posts/']",
+  "a[href*='/permalink/']",
+  "a[href*='story_fbid']",
+  "a[href*='fbid=']",
+  "a[href*='fb_id=']",
+  "a[href*='?v=']",
+  "a[href*='&v=']"
+].join(", ");
 
 // Minimum text length for a container to be considered a post card on search pages.
 const SEARCH_CARD_MIN_TEXT = 60;
+
+// Aria-label patterns that identify Facebook engagement buttons (Like/Comment/Share).
+const ENGAGEMENT_ARIA_RE = /like|j'aime|aime|comment|share|partag|react|mention|إعجاب|تعليق|مشاركة/i;
 
 /**
  * Given an anchor element that points to a post, walk up the DOM to find the
@@ -676,19 +815,19 @@ function findPostCardContainer(link) {
   let best = null;
   let el = link.parentElement;
 
-  for (let depth = 0; depth < 20 && el; depth += 1) {
+  for (let depth = 0; depth < 40 && el; depth += 1) {
     if (STOP_TAGS.has(el.tagName)) break;
     const role = (el.getAttribute("role") || "").toLowerCase();
     if (STOP_ROLES.has(role)) break;
 
     const text = cleanText(el.innerText || el.textContent || "");
     if (text.length >= SEARCH_CARD_MIN_TEXT) {
-      // Keep climbing as long as the next parent would still be a card-level element,
-      // but stop before we absorb multiple cards (detect by sudden huge text growth).
+      // Stop before absorbing multiple cards: tighter 1.8x multiplier so we
+      // don't climb into a 2-card wrapper when only 2 posts are on screen.
       if (best) {
         const parentText = cleanText((el.parentElement && (el.parentElement.innerText || el.parentElement.textContent)) || "");
         const parentRole = el.parentElement ? (el.parentElement.getAttribute("role") || "").toLowerCase() : "";
-        if (STOP_ROLES.has(parentRole) || parentText.length > text.length * 3) {
+        if (STOP_ROLES.has(parentRole) || parentText.length > text.length * 1.8) {
           break; // parent is a multi-card container — stop here
         }
       }
@@ -768,6 +907,37 @@ function collectArticleNodes(root) {
       if (!(link instanceof Element)) continue;
       const card = findPostCardContainer(link);
       if (card) nodes.push(card);
+    }
+  }
+
+  if (isSearchPage && !nodes.length) {
+    // Strategy 4: anchor on engagement buttons (Like/Comment/Share) that have aria-labels.
+    // Facebook always renders these on every post card regardless of DOM structure.
+    const engagementBtns = document.querySelectorAll("[role='button'][aria-label]");
+    for (const btn of engagementBtns) {
+      if (!(btn instanceof Element)) continue;
+      const label = btn.getAttribute("aria-label") || "";
+      if (!ENGAGEMENT_ARIA_RE.test(label)) continue;
+      const card = findPostCardContainer(btn);
+      if (!card) continue;
+      const text = cleanText(card.innerText || card.textContent || "");
+      if (text.length >= SEARCH_CARD_MIN_TEXT) nodes.push(card);
+    }
+  }
+
+  if (isSearchPage && !nodes.length) {
+    // Strategy 5 (nuclear): find ANY div that has 2+ role=button descendants and enough text.
+    // No selector assumptions — purely structural. Grabs the smallest such container.
+    const allButtons = Array.from(document.querySelectorAll("[role='button']"));
+    // Group buttons by their nearest substantial ancestor.
+    for (const btn of allButtons) {
+      if (!(btn instanceof Element)) continue;
+      const card = findPostCardContainer(btn);
+      if (!card) continue;
+      const btnsInCard = card.querySelectorAll("[role='button']").length;
+      if (btnsInCard < 2) continue;
+      const text = cleanText(card.innerText || card.textContent || "");
+      if (text.length >= SEARCH_CARD_MIN_TEXT) nodes.push(card);
     }
   }
   // ─────────────────────────────────────────────────────────────────────────
@@ -889,10 +1059,100 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (high - low + 1)) + low;
 }
 
+function isElementScrollable(element) {
+  if (!(element instanceof Element)) {
+    return false;
+  }
+
+  const style = window.getComputedStyle(element);
+  const overflowY = String(style.overflowY || "").toLowerCase();
+  const canScrollByStyle = overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay";
+  return canScrollByStyle && element.scrollHeight > element.clientHeight + 24;
+}
+
+function findActiveScrollContainer() {
+  const candidates = [];
+  const scrollingElement = document.scrollingElement || document.documentElement || document.body;
+  if (scrollingElement) {
+    candidates.push(scrollingElement);
+  }
+
+  const feed = document.querySelector("[role='feed']");
+  if (feed instanceof Element) {
+    let current = feed;
+    for (let depth = 0; depth < 8 && current; depth += 1) {
+      candidates.unshift(current);
+      current = current.parentElement;
+    }
+  }
+
+  const main = document.querySelector("[role='main']");
+  if (main instanceof Element) {
+    candidates.push(main);
+  }
+
+  for (const candidate of candidates) {
+    if (candidate === document.body || candidate === document.documentElement || candidate === document.scrollingElement) {
+      continue;
+    }
+    if (isElementScrollable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return scrollingElement;
+}
+
+function getScrollMetrics(target = findActiveScrollContainer()) {
+  const element = target || document.scrollingElement || document.documentElement || document.body;
+  const isRootScroller =
+    element === window ||
+    element === document.body ||
+    element === document.documentElement ||
+    element === document.scrollingElement;
+
+  if (isRootScroller) {
+    const root = document.scrollingElement || document.documentElement || document.body;
+    return {
+      target: root,
+      top: Math.max(0, Math.round(window.scrollY || root.scrollTop || 0)),
+      height: Math.max(root.scrollHeight || 0, document.body ? document.body.scrollHeight : 0, window.innerHeight || 0),
+      viewport: Math.max(window.innerHeight || 0, document.documentElement ? document.documentElement.clientHeight : 0),
+    };
+  }
+
+  return {
+    target: element,
+    top: Math.max(0, Math.round(element.scrollTop || 0)),
+    height: Math.max(0, element.scrollHeight || 0),
+    viewport: Math.max(0, element.clientHeight || 0),
+  };
+}
+
+function performScrollStep(target, scrollStep) {
+  const element = target || findActiveScrollContainer();
+  const isRootScroller =
+    element === window ||
+    element === document.body ||
+    element === document.documentElement ||
+    element === document.scrollingElement;
+
+  if (isRootScroller) {
+    const root = document.scrollingElement || document.documentElement || document.body;
+    const nextTop = Math.max(0, (window.scrollY || root.scrollTop || 0) + scrollStep);
+    window.scrollTo({ top: nextTop, left: 0, behavior: "auto" });
+    root.scrollTop = nextTop;
+    if (document.body && document.body !== root) {
+      document.body.scrollTop = nextTop;
+    }
+    return;
+  }
+
+  element.scrollTop = Math.max(0, Number(element.scrollTop || 0) + scrollStep);
+}
+
 function getScrollHeight() {
-  const bodyHeight = document.body ? document.body.scrollHeight : 0;
-  const docHeight = document.documentElement ? document.documentElement.scrollHeight : 0;
-  return Math.max(bodyHeight, docHeight, window.innerHeight || 0);
+  return getScrollMetrics().height;
 }
 
 function normalizeAutoScrollConfig(config) {
@@ -961,11 +1221,11 @@ async function runAutoScrollTick() {
   }
 
   const config = autoScrollState.config;
-  const beforeHeight = getScrollHeight();
-  const beforeY = Math.max(0, Math.round(window.scrollY || 0));
+  const scrollTarget = findActiveScrollContainer();
+  const beforeMetrics = getScrollMetrics(scrollTarget);
   const scrollStep = randomInt(config.step_min_px, config.step_max_px);
 
-  window.scrollBy({ top: scrollStep, left: 0, behavior: "smooth" });
+  performScrollStep(scrollTarget, scrollStep);
   await delay(config.interval_ms);
 
   const discoveredPosts = extractPostsFromPage(document.body);
@@ -974,10 +1234,12 @@ async function runAutoScrollTick() {
     queuePosts(discoveredPosts);
   }
 
-  const afterHeight = getScrollHeight();
-  const afterY = Math.max(0, Math.round(window.scrollY || 0));
-  const atBottom = afterY + window.innerHeight >= afterHeight - 8;
-  const progressed = discoveredPosts.length > 0 || afterHeight > beforeHeight || afterY > beforeY;
+  const afterMetrics = getScrollMetrics(scrollTarget);
+  const atBottom = afterMetrics.top + afterMetrics.viewport >= afterMetrics.height - 8;
+  const progressed =
+    discoveredPosts.length > 0 ||
+    afterMetrics.height > beforeMetrics.height ||
+    afterMetrics.top > beforeMetrics.top;
 
   autoScrollState.steps += 1;
   autoScrollState.idleRounds = progressed && !atBottom ? 0 : autoScrollState.idleRounds + 1;

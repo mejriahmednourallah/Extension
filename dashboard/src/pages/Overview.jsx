@@ -114,6 +114,19 @@ export default function Overview() {
                         <span style={{ fontSize: '11px', color: 'var(--text2)' }}>
                           {formatRelativeTime(alert.created_at)}
                         </span>
+                        {alert.post_url && (
+                          <a
+                            href={alert.post_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="post-lnk"
+                            style={{ fontSize: '11px', marginLeft: 'auto', color: 'var(--accent)', textDecoration: 'none' }}
+                            onMouseOver={(e) => (e.target.style.textDecoration = 'underline')}
+                            onMouseOut={(e) => (e.target.style.textDecoration = 'none')}
+                          >
+                            Voir le post
+                          </a>
+                        )}
                       </div>
                       <div style={{ fontSize: '13px', color: 'var(--text2)', marginTop: '6px' }}>
                         {truncateText(alert.post_text, 100)}

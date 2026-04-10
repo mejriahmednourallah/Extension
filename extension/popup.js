@@ -21,9 +21,7 @@ const state = {
       min_combo_strong_hits: 1,
       min_combo_weak_hits: 1
     },
-    backend_url: "http://localhost:8000",
-    groq_api_key: "",
-    gemini_api_key: ""
+    backend_url: "http://localhost:8000"
   },
   last_scan: null,
   daily_metrics: null,
@@ -459,8 +457,7 @@ function renderConfig() {
   document.getElementById("clientNameInput").value = state.config.client_name || "";
   document.getElementById("alertEmailInput").value = state.config.alert_email || "";
   document.getElementById("autoScanInput").checked = state.config.auto_scan !== false;
-  document.getElementById("groqKeyInput").value = state.config.groq_api_key || "";
-  document.getElementById("geminiKeyInput").value = state.config.gemini_api_key || "";
+
   document.getElementById("backendUrlInput").value =
     state.config.backend_url || "http://localhost:8000";
 }
@@ -608,8 +605,7 @@ function setupConfigForm() {
       client_name: document.getElementById("clientNameInput").value.trim(),
       alert_email: document.getElementById("alertEmailInput").value.trim(),
       auto_scan: document.getElementById("autoScanInput").checked,
-      groq_api_key: document.getElementById("groqKeyInput").value.trim(),
-      gemini_api_key: document.getElementById("geminiKeyInput").value.trim(),
+
       backend_url:
         document.getElementById("backendUrlInput").value.trim() || "http://localhost:8000"
     };

@@ -223,12 +223,17 @@ const BACKEND_PROBE_BASE_DELAY_MS = 1500;
 const BACKEND_PROBE_TIMEOUT_MS = 12000;
 const ANALYZE_REQUEST_TIMEOUT_MS = 35000;
 const ANALYZE_REQUEST_MAX_ATTEMPTS = 2;
+const ANALYZE_REQUEST_BATCH_SIZE = 8;
+const ANALYZE_REQUEST_TIMEOUT_PER_POST_MS = 5000;
+const ANALYZE_REQUEST_TIMEOUT_MAX_MS = 90000;
+const QUEUE_BATCH_RETRY_MAX = 3;
 const BACKEND_HEALTH_CACHE_TTL_MS = 60000;
 const GROUPS_SYNC_TTL_MS = 60000;
 const EXTENSION_STATE_SYNC_TTL_MS = 60000;
 
 const analyzeQueue = [];
 let analyzeWorkerRunning = false;
+const analyzeQueueRetryByBatchKey = new Map();
 const backendHealthyUntilByUrl = new Map();
 const groupsSyncedUntilByUrl = new Map();
 const extensionStateSyncedUntilByUrl = new Map();
@@ -366,6 +371,35 @@ function storageSet(values) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function splitIntoChunks(items, size) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const chunkSize = Math.max(1, Number(size || 1));
+  const chunks = [];
+
+  for (let index = 0; index < safeItems.length; index += chunkSize) {
+    chunks.push(safeItems.slice(index, index + chunkSize));
+  }
+
+  return chunks;
+}
+
+function getBatchRetryKey(posts) {
+  if (!Array.isArray(posts) || !posts.length) {
+    return "empty";
+  }
+
+  const ids = posts
+    .map((item) => (item && item.id ? String(item.id) : ""))
+    .filter(Boolean)
+    .sort();
+
+  if (!ids.length) {
+    return `len:${posts.length}`;
+  }
+
+  return `len:${posts.length}|first:${ids[0]}|last:${ids[ids.length - 1]}`;
 }
 
 function formatErrorDetails(error) {
@@ -957,12 +991,7 @@ async function ensureStorageDefaults() {
   if (!String(config.backend_url || "").trim()) {
     config.backend_url = DEFAULT_CONFIG.backend_url;
   }
-  if (!String(config.groq_api_key || "").trim()) {
-    config.groq_api_key = DEFAULT_CONFIG.groq_api_key;
-  }
-  if (!String(config.gemini_api_key || "").trim()) {
-    config.gemini_api_key = DEFAULT_CONFIG.gemini_api_key;
-  }
+
   config.keyword_tiers = normalizeKeywordTiersMap(config.keyword_tiers);
   config.keyword_gate = {
     ...DEFAULT_CONFIG.keyword_gate,
@@ -989,8 +1018,7 @@ async function callAnalyzeApi(posts) {
   const config = { ...DEFAULT_CONFIG, ...(configFromStorage || {}) };
   const installationId = String(installationIdFromStorage || "").trim() || (await ensureInstallationId());
 
-  const requestPayload = {
-    posts,
+  const requestPayloadBase = {
     client_name: config.client_name || "",
     keywords: Array.isArray(config.keywords) ? config.keywords : [],
     alert_email: config.alert_email || "",
@@ -1023,62 +1051,123 @@ async function callAnalyzeApi(posts) {
     return { results: [], alerts_sent: 0 };
   }
 
-  requestPayload.posts = filteredPosts;
+  const configuredBatchSize = Math.max(
+    1,
+    Number(config.analyze_batch_size || ANALYZE_REQUEST_BATCH_SIZE)
+  );
+  const batches = splitIntoChunks(filteredPosts, configuredBatchSize);
 
-  let response = null;
-  let lastAnalyzeError = null;
-  for (let attempt = 1; attempt <= ANALYZE_REQUEST_MAX_ATTEMPTS; attempt += 1) {
-    try {
-      response = await fetchWithTimeout(
-        `${backendUrl}/analyze`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify(requestPayload)
-        },
-        ANALYZE_REQUEST_TIMEOUT_MS
-      );
-      break;
-    } catch (error) {
-      lastAnalyzeError = error;
-      if (attempt < ANALYZE_REQUEST_MAX_ATTEMPTS) {
-        await wait(500 * attempt);
+  logSw("analyze_api.batch_plan", {
+    total_posts: filteredPosts.length,
+    batch_size: configuredBatchSize,
+    total_batches: batches.length,
+  });
+
+  const aggregatedResults = [];
+  let aggregatedAlertsSent = 0;
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batchPosts = batches[batchIndex];
+    const batchTimeoutMs = Math.min(
+      ANALYZE_REQUEST_TIMEOUT_MAX_MS,
+      Math.max(
+        ANALYZE_REQUEST_TIMEOUT_MS,
+        ANALYZE_REQUEST_TIMEOUT_MS + (batchPosts.length * ANALYZE_REQUEST_TIMEOUT_PER_POST_MS)
+      )
+    );
+
+    const batchPayload = {
+      ...requestPayloadBase,
+      posts: batchPosts,
+    };
+
+    let response = null;
+    let lastAnalyzeError = null;
+
+    for (let attempt = 1; attempt <= ANALYZE_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        response = await fetchWithTimeout(
+          `${backendUrl}/analyze`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify(batchPayload)
+          },
+          batchTimeoutMs
+        );
+        break;
+      } catch (error) {
+        lastAnalyzeError = error;
+        logSw("analyze_api.batch_retry", {
+          batch_index: batchIndex + 1,
+          total_batches: batches.length,
+          attempt,
+          max_attempts: ANALYZE_REQUEST_MAX_ATTEMPTS,
+          timeout_ms: batchTimeoutMs,
+          posts_in_batch: batchPosts.length,
+          error: String(error && error.message ? error.message : error),
+        });
+        if (attempt < ANALYZE_REQUEST_MAX_ATTEMPTS) {
+          await wait(500 * attempt);
+        }
       }
     }
-  }
 
-  if (!response) {
-    throw new Error(
-      `Analyze request failed after ${ANALYZE_REQUEST_MAX_ATTEMPTS} attempt(s): ${formatErrorDetails(lastAnalyzeError)}`
-    );
-  }
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Backend error ${response.status}: ${message}`);
-  }
-
-  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-  if (!contentType.includes("application/json")) {
-    const body = await response.text();
-    if (/pinggy\.web\.debugger|screen\.html/i.test(body)) {
+    if (!response) {
       throw new Error(
-        "Backend URL points to Pinggy debugger page, not API tunnel. Use the direct public tunnel URL that forwards to localhost:8000."
+        `Analyze batch ${batchIndex + 1}/${batches.length} failed after ${ANALYZE_REQUEST_MAX_ATTEMPTS} attempt(s): ${formatErrorDetails(lastAnalyzeError)}`
       );
     }
 
-    throw new Error(
-      `Unexpected backend response type: ${contentType || "unknown"}. Expected JSON from /analyze.`
-    );
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(`Backend error on batch ${batchIndex + 1}/${batches.length} (${response.status}): ${message}`);
+    }
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      const body = await response.text();
+      if (/pinggy\.web\.debugger|screen\.html/i.test(body)) {
+        throw new Error(
+          "Backend URL points to Pinggy debugger page, not API tunnel. Use the direct public tunnel URL that forwards to localhost:8000."
+        );
+      }
+
+      throw new Error(
+        `Unexpected backend response type on batch ${batchIndex + 1}/${batches.length}: ${contentType || "unknown"}. Expected JSON from /analyze.`
+      );
+    }
+
+    const responsePayload = await response.json();
+    const batchResults = Array.isArray(responsePayload && responsePayload.results)
+      ? responsePayload.results
+      : [];
+    const batchAlertsSent = Number(responsePayload && responsePayload.alerts_sent || 0);
+
+    aggregatedResults.push(...batchResults);
+    aggregatedAlertsSent += Math.max(0, batchAlertsSent);
+
+    logSw("analyze_api.batch_success", {
+      batch_index: batchIndex + 1,
+      total_batches: batches.length,
+      sent_posts: batchPosts.length,
+      timeout_ms: batchTimeoutMs,
+      results: batchResults.length,
+      alerts_sent: batchAlertsSent,
+    });
   }
 
-  const responsePayload = await response.json();
   logSw("analyze_api.success", {
     sent_posts: filteredPosts.length,
-    results: Array.isArray(responsePayload && responsePayload.results) ? responsePayload.results.length : 0,
-    alerts_sent: Number(responsePayload && responsePayload.alerts_sent || 0),
+    results: aggregatedResults.length,
+    alerts_sent: aggregatedAlertsSent,
+    batches: batches.length,
   });
-  return responsePayload;
+
+  return {
+    results: aggregatedResults,
+    alerts_sent: aggregatedAlertsSent,
+  };
 }
 
 async function handleAnalyzePosts(posts) {
@@ -1161,11 +1250,35 @@ async function processAnalyzeQueue() {
       }
 
       logSw("queue.dequeue", { batch_posts: posts.length, remaining: analyzeQueue.length });
+      const batchRetryKey = getBatchRetryKey(posts);
 
       try {
         await handleAnalyzePosts(posts);
+        analyzeQueueRetryByBatchKey.delete(batchRetryKey);
       } catch (error) {
         console.error("analyze_posts processing failed", formatErrorDetails(error));
+        const currentRetry = Number(analyzeQueueRetryByBatchKey.get(batchRetryKey) || 0);
+
+        if (currentRetry < QUEUE_BATCH_RETRY_MAX) {
+          const nextRetry = currentRetry + 1;
+          analyzeQueueRetryByBatchKey.set(batchRetryKey, nextRetry);
+          analyzeQueue.push(posts);
+          logSw("queue.batch_requeued_after_failure", {
+            retry: nextRetry,
+            max_retry: QUEUE_BATCH_RETRY_MAX,
+            batch_posts: posts.length,
+            queue_length: analyzeQueue.length,
+            error: String(error && error.message ? error.message : error),
+          });
+          await wait(1000 * nextRetry);
+        } else {
+          analyzeQueueRetryByBatchKey.delete(batchRetryKey);
+          logSw("queue.batch_dropped_after_retries", {
+            retries: currentRetry,
+            batch_posts: posts.length,
+            error: String(error && error.message ? error.message : error),
+          });
+        }
       }
     }
   } finally {
@@ -1365,9 +1478,7 @@ async function syncCurrentConfigToBackend() {
   await refreshGroupsFromBackend(backendUrl, headers);
 }
 
-function isFacebookGroupUrl(url) {
-  return /^https:\/\/(www|web|m)\.facebook\.com\/groups\//i.test(String(url || ""));
-}
+
 
 function sendTabActionMessage(tabId, payload) {
   return new Promise((resolve) => {
@@ -1399,14 +1510,48 @@ async function injectContentScript(tabId) {
   }
 }
 
-async function manualScanActiveTab() {
-  // Use lastFocusedWindow so the popup opening its own window doesn't hide the Facebook tab.
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs.length || !tabs[0].id) {
-    return { ok: false, error: "No active tab" };
+
+/**
+ * Returns true for any Facebook page the extension can scan:
+ * groups, search results, and hashtag pages.
+ */
+function isFacebookScanablePage(url) {
+  if (!url) return false;
+  return /^https?:\/\/(www\.|web\.|m\.)?facebook\.com\/(groups|search|hashtag)\//i.test(url);
+}
+
+// Alias used by manualScanActiveTab and sendActionToActiveFacebookGroup
+const isFacebookGroupUrl = isFacebookScanablePage;
+
+async function findFacebookGroupTab() {
+  const fbGroupUrls = [
+    "https://www.facebook.com/groups/*",
+    "https://web.facebook.com/groups/*",
+    "https://m.facebook.com/groups/*",
+    "https://www.facebook.com/search/*",
+    "https://web.facebook.com/search/*",
+    "https://m.facebook.com/search/*",
+    "https://www.facebook.com/hashtag/*",
+    "https://web.facebook.com/hashtag/*",
+    "https://m.facebook.com/hashtag/*"
+  ];
+
+  const tabs = await chrome.tabs.query({ url: fbGroupUrls });
+  if (!tabs.length) {
+    return null;
   }
 
-  const activeTab = tabs[0];
+  // Prefer an active tab, otherwise take the first (most recently opened).
+  return tabs.find((t) => t.active) || tabs[0];
+}
+
+async function manualScanActiveTab() {
+  // URL-pattern query — works even when the popup is the focused window.
+  const activeTab = await findFacebookGroupTab();
+  if (!activeTab || !activeTab.id) {
+    return { ok: false, error: "No Facebook group tab found. Open a group page first." };
+  }
+
   const tabId = activeTab.id;
 
   logSw("manual_scan.request", {
@@ -1417,7 +1562,7 @@ async function manualScanActiveTab() {
   if (!isFacebookGroupUrl(activeTab.url)) {
     return {
       ok: false,
-      error: "Open a Facebook group page first (www/web/m.facebook.com/groups/...)"
+      error: "Open a Facebook group, search, or hashtag page first."
     };
   }
 
@@ -1458,19 +1603,18 @@ async function manualScanActiveTab() {
 }
 
 async function sendActionToActiveFacebookGroup(messagePayload) {
-  // Use lastFocusedWindow so the popup opening its own window doesn't hide the Facebook tab.
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs.length || !tabs[0].id) {
-    return { ok: false, error: "No active tab" };
+  // URL-pattern query — works even when the popup is the focused window.
+  const activeTab = await findFacebookGroupTab();
+  if (!activeTab || !activeTab.id) {
+    return { ok: false, error: "No Facebook group tab found. Open a group page first." };
   }
 
-  const activeTab = tabs[0];
   const tabId = activeTab.id;
 
   if (!isFacebookGroupUrl(activeTab.url)) {
     return {
       ok: false,
-      error: "Open a Facebook group page first (www/web/m.facebook.com/groups/...)"
+      error: "Open a Facebook group, search, or hashtag page first."
     };
   }
 

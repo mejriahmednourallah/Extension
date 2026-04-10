@@ -80,15 +80,73 @@ async def analyze_posts(request: AnalyzeRequest) -> AnalyzeResponse:
     results: list[SentimentResult] = []
     alerts_sent = 0
 
-    for post in request.posts:
-        if storage.alert_exists(post.id):
-            continue
+    # Filter out already-processed posts before paying for any LLM calls.
+    new_posts = [p for p in request.posts if not storage.alert_exists(p.id)]
+    if not new_posts:
+        return AnalyzeResponse(results=[], alerts_sent=0)
 
-        sentiment_data = await llm.analyze_post(
+    # ------------------------------------------------------------------
+    # Phase 1 — Local pre-classification (zero API calls)
+    # Posts that are obviously negative (anchor + pejorative word) or
+    # obviously low-signal (no anchor, no strong, ≤1 weak) are classified
+    # immediately. Only ambiguous posts move to the LLM batch phase.
+    # ------------------------------------------------------------------
+    pre_classified: dict[str, dict] = {}
+    llm_needed: list = []
+
+    for post in new_posts:
+        local_result = llm.local_pre_classify(
             post_text=post.text,
+            anchor_hits=post.keyword_gate_anchor_hits,
+            strong_hits=post.keyword_gate_strong_hits,
+            weak_hits=post.keyword_gate_weak_hits,
+            keywords=request.keywords,
+        )
+        if local_result is not None:
+            pre_classified[post.id] = local_result
+            logger.info("Post %s pre-classified locally as %s.", post.id, local_result["sentiment"])
+        else:
+            llm_needed.append(post)
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Batched LLM analysis (4 posts per call)
+    # ------------------------------------------------------------------
+    llm_results: dict[str, dict] = {}
+
+    for i in range(0, len(llm_needed), llm.BATCH_SIZE):
+        chunk = llm_needed[i : i + llm.BATCH_SIZE]
+        batch_input = [(p.id, p.text) for p in chunk]
+        batch_output = await llm.analyze_posts_batch(
+            posts=batch_input,
             client_name=request.client_name,
             keywords=request.keywords,
         )
+        for post, sentiment_data in zip(chunk, batch_output):
+            if sentiment_data is not None:
+                llm_results[post.id] = sentiment_data
+            else:
+                # Batch failed for this post — fall back to local pre-classify
+                # with relaxed thresholds (treat as 'needs review').
+                fallback = llm.local_pre_classify(
+                    post_text=post.text,
+                    anchor_hits=max(post.keyword_gate_anchor_hits, 1),  # force through
+                    strong_hits=post.keyword_gate_strong_hits,
+                    weak_hits=post.keyword_gate_weak_hits,
+                    keywords=request.keywords,
+                ) or {"sentiment": "neutral", "score": 0.0, "category": "other",
+                      "keywords_matched": [], "bad_buzz_suggestions": []}
+                llm_results[post.id] = fallback
+                logger.warning("Post %s fell back to local classification after batch failure.", post.id)
+
+    # ------------------------------------------------------------------
+    # Phase 3 — Persist + assemble results
+    # ------------------------------------------------------------------
+    all_sentiment: dict[str, dict] = {**pre_classified, **llm_results}
+
+    for post in new_posts:
+        sentiment_data = all_sentiment.get(post.id)
+        if sentiment_data is None:
+            continue
 
         llm_keywords = [
             str(item).strip()
@@ -102,7 +160,6 @@ async def analyze_posts(request: AnalyzeRequest) -> AnalyzeResponse:
         ]
         merged_keywords = list(dict.fromkeys([*local_keywords, *llm_keywords]))
 
-        # Hard relevance gate: skip storage/alerts when no monitored keyword evidence exists.
         if not merged_keywords:
             continue
 
