@@ -563,3 +563,104 @@ header {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Stat card color highlights ─────────────────────────────── */
+.stat-card {
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow 0.18s, transform 0.18s;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 12px 12px 0 0;
+}
+
+.stat-card:hover {
+  box-shadow: 0 4px 18px rgba(0,0,0,0.08);
+  transform: translateY(-1px);
+}
+
+.stat-card--blue::before  { background: #3b82f6; }
+.stat-card--red::before   { background: #ef4444; }
+.stat-card--orange::before { background: #f97316; }
+.stat-card--green::before { background: #22c55e; }
+.stat-card--purple::before { background: #a855f7; }
+
+.stat-card--blue   { border-top: 3px solid #3b82f6; }
+.stat-card--red    { border-top: 3px solid #ef4444; }
+.stat-card--orange { border-top: 3px solid #f97316; }
+.stat-card--green  { border-top: 3px solid #22c55e; }
+.stat-card--purple { border-top: 3px solid #a855f7; }
+
+/* smaller value for the session timer */
+.stat-value--sm {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+/* ── Panel highlight ─────────────────────────────────────────── */
+.panel--highlight {
+  border-top: 3px solid #3b82f6;
+  transition: box-shadow 0.18s;
+}
+
+.panel--highlight:hover {
+  box-shadow: 0 4px 20px rgba(59,130,246,0.10);
+}
+
+/* ── Expandable suggestions (details/summary) ────────────────── */
+.bb-suggestions-details {
+  border-top: 1px solid var(--border);
+}
+
+.bb-suggestions-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  list-style: none;
+  user-select: none;
+  gap: 8px;
+  transition: background 0.15s;
+}
+
+.bb-suggestions-toggle:hover {
+  background: var(--bg3);
+}
+
+.bb-suggestions-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.bb-suggestions-toggle::after {
+  content: '▸';
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+
+details[open] > .bb-suggestions-toggle::after {
+  transform: rotate(90deg);
+}
+
+.bb-suggestions-count {
+  margin-left: auto;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+}
+

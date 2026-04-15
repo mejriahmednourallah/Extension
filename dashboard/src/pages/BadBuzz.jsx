@@ -159,57 +159,60 @@ export default function BadBuzz() {
                     : 'Aucun contenu disponible'}
                 </div>
 
-                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text2)', padding: '0 20px 10px' }}>
-                  Propositions de reponse suggerees:
-                </div>
+                <details className="bb-suggestions-details">
+                  <summary className="bb-suggestions-toggle">
+                    <span>Propositions de réponse suggérées</span>
+                    <span className="bb-suggestions-count">{responses.length} suggestion{responses.length > 1 ? 's' : ''}</span>
+                  </summary>
 
-                <div className="bb-responses">
-                  {responses.map((responseText, index) => (
-                    <div className="resp-card" key={`${alert.id}-resp-${index}`}>
-                      {(() => {
-                        const suggestionKey = `${alert.id}-resp-${index}`;
-                        const isExpanded = Boolean(expandedSuggestions[suggestionKey]);
-                        const canExpand = String(responseText || '').length > 190;
-                        const previewText = canExpand && !isExpanded
-                          ? `${String(responseText).slice(0, 190)}...`
-                          : responseText;
+                  <div className="bb-responses">
+                    {responses.map((responseText, index) => (
+                      <div className="resp-card" key={`${alert.id}-resp-${index}`}>
+                        {(() => {
+                          const suggestionKey = `${alert.id}-resp-${index}`;
+                          const isExpanded = Boolean(expandedSuggestions[suggestionKey]);
+                          const canExpand = String(responseText || '').length > 190;
+                          const previewText = canExpand && !isExpanded
+                            ? `${String(responseText).slice(0, 190)}...`
+                            : responseText;
 
-                        return (
-                          <>
-                            <div className="resp-head">
-                              <span className={`strat-pill ${useFallbackResponses ? (index === 0 ? 'sp-esc' : 'sp-emp') : 'sp-emp'}`}>
+                          return (
+                            <>
+                              <div className="resp-head">
+                                <span className={`strat-pill ${useFallbackResponses ? (index === 0 ? 'sp-esc' : 'sp-emp') : 'sp-emp'}`}>
+                                  {useFallbackResponses
+                                    ? (index === 0 ? 'Template escalation' : 'Template empathique')
+                                    : `Suggestion IA ${index + 1}`}
+                                </span>
+                                <button
+                                  className="copy-btn"
+                                  onClick={() => handleCopyResponse(responseText)}
+                                >
+                                  Copier
+                                </button>
+                              </div>
+                              <div className="resp-text">{previewText}</div>
+                              {canExpand && (
+                                <button
+                                  type="button"
+                                  className="resp-toggle"
+                                  onClick={() => toggleSuggestion(suggestionKey)}
+                                >
+                                  {isExpanded ? 'Voir moins' : 'Voir plus'}
+                                </button>
+                              )}
+                              <div className="resp-why">
                                 {useFallbackResponses
-                                  ? (index === 0 ? 'Template escalation' : 'Template empathique')
-                                  : `Suggestion IA ${index + 1}`}
-                              </span>
-                              <button
-                                className="copy-btn"
-                                onClick={() => handleCopyResponse(responseText)}
-                              >
-                                Copier
-                              </button>
-                            </div>
-                            <div className="resp-text">{previewText}</div>
-                            {canExpand && (
-                              <button
-                                type="button"
-                                className="resp-toggle"
-                                onClick={() => toggleSuggestion(suggestionKey)}
-                              >
-                                {isExpanded ? 'Voir moins' : 'Voir plus'}
-                              </button>
-                            )}
-                            <div className="resp-why">
-                              {useFallbackResponses
-                                ? 'Template local utilise car aucune suggestion LLM n\'a ete retournee.'
-                                : 'Suggestion generee et retournee par le backend LLM.'}
-                            </div>
-                          </>
-                        );
-                      })()}
-                    </div>
-                  ))}
-                </div>
+                                  ? "Template local utilisé car aucune suggestion LLM n'a été retournée."
+                                  : 'Suggestion générée et retournée par le backend LLM.'}
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ))}
+                  </div>
+                </details>
               </div>
             );
           })

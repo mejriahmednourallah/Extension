@@ -1,7 +1,48 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { alertsAPI, groupsAPI, systemAPI } from '../utils/api';
 import { formatRelativeTime, formatNumber, truncateText } from '../utils/formatters';
 import { sentimentToColor } from '../utils/colors';
+
+// Agents always "active" in this session
+const AGENTS = [
+  { id: 1, name: 'Ahmed Nour Allah Mejri', avatar: 'AN' },
+  { id: 2, name: 'Mariem Bouslama', avatar: 'MB' },
+];
+
+function useAgentTimer() {
+  // Each agent gets a random starting offset (0–4 min) and ticks every second
+  const [seconds, setSeconds] = useState(() =>
+    AGENTS.map(() => Math.floor(Math.random() * 240))
+  );
+  useEffect(() => {
+    const id = setInterval(() => {
+      setSeconds((prev) => prev.map((s) => s + 1));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return seconds;
+}
+
+function useSessionTimer() {
+  const startRef = useRef(Date.now());
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+  return elapsed;
+}
+
+function formatDuration(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
 
 export default function Overview() {
   const [alerts, setAlerts] = useState([]);
@@ -12,8 +53,10 @@ export default function Overview() {
     alertCount: 0,
     groupCount: 0,
     avgScore: 0,
-    uptime: 'Live',
   });
+
+  const agentSeconds = useAgentTimer();
+  const sessionElapsed = useSessionTimer();
 
   useEffect(() => {
     fetchData();
@@ -43,7 +86,6 @@ export default function Overview() {
         alertCount: Number(statsData.alerts_today || 0),
         groupCount: Number(statsData.groups_active_count || groupsData.filter((g) => g.enabled !== false).length),
         avgScore: normalizedAvgScore,
-        uptime: statsData.last_scan_at ? 'Live' : 'Idle',
       });
     } catch (error) {
       console.error('Error fetching overview data:', error);
@@ -63,37 +105,40 @@ export default function Overview() {
         <p style={{ fontSize: '13px', color: 'var(--text2)', marginTop: '3px' }}>Vue d'ensemble des activités</p>
       </div>
 
+      {/* ── KPI cards ── */}
       <div className="stats-grid">
-        <div className="stat-card">
+        <div className="stat-card stat-card--blue">
           <div className="stat-label">Posts analysés</div>
           <div className="stat-value">{formatNumber(stats.totalPosts)}</div>
-          <div className="stat-bar" style={{ background: '#334155' }}></div>
+          <div className="stat-bar" style={{ background: '#3b82f6' }}></div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card stat-card--red">
           <div className="stat-label">Alertes détectées</div>
           <div className="stat-value">{stats.alertCount}</div>
           <div className="stat-bar" style={{ background: '#ef4444' }}></div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card stat-card--orange">
           <div className="stat-label">Groupes surveillés</div>
           <div className="stat-value">{stats.groupCount}</div>
           <div className="stat-bar" style={{ background: '#f97316' }}></div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card stat-card--green">
           <div className="stat-label">Score moyen</div>
           <div className="stat-value">{stats.avgScore}%</div>
           <div className="stat-bar" style={{ background: '#22c55e' }}></div>
         </div>
-        <div className="stat-card">
-          <div className="stat-label">Uptime système</div>
-          <div className="stat-value">{stats.uptime}</div>
+        {/* Session timer replaces the old "Uptime" live card */}
+        <div className="stat-card stat-card--purple">
+          <div className="stat-label">Session en cours</div>
+          <div className="stat-value stat-value--sm">{formatDuration(sessionElapsed)}</div>
           <div className="stat-bar" style={{ background: '#a855f7' }}></div>
         </div>
       </div>
 
       <div className="grid-main">
+        {/* ── Dernières alertes ── */}
         <div>
-          <div className="panel">
+          <div className="panel panel--highlight">
             <div className="panel-header">
               <h3>Dernieres alertes</h3>
             </div>
@@ -139,12 +184,14 @@ export default function Overview() {
           </div>
         </div>
 
-        <div>
-          <div className="panel">
+        {/* ── Right column ── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Groupes actifs */}
+          <div className="panel panel--highlight">
             <div className="panel-header">
               <h3>Groupes actifs</h3>
             </div>
-            <div style={{ maxHeight: '540px', overflowY: 'auto' }}>
+            <div style={{ maxHeight: '230px', overflowY: 'auto' }}>
               {groups.length === 0 ? (
                 <div style={{ padding: '20px', color: 'var(--text2)', textAlign: 'center' }}>
                   Aucun groupe
@@ -159,6 +206,54 @@ export default function Overview() {
                   </div>
                 ))
               )}
+            </div>
+          </div>
+
+          {/* Agents actifs */}
+          <div className="panel panel--highlight">
+            <div className="panel-header" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h3>Agents actifs</h3>
+              <span style={{
+                background: '#dcfce7',
+                color: '#16a34a',
+                fontSize: '10px',
+                fontWeight: 700,
+                borderRadius: '999px',
+                padding: '2px 8px',
+              }}>
+                {AGENTS.length} en ligne
+              </span>
+            </div>
+            <div>
+              {AGENTS.map((agent, idx) => (
+                <div key={agent.id} className="agent-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {/* Avatar */}
+                  <div style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: '50%',
+                    background: idx === 0 ? '#dbeafe' : '#f3e8ff',
+                    color: idx === 0 ? '#1d4ed8' : '#7c3aed',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontWeight: 700,
+                    fontSize: '12px',
+                    flexShrink: 0,
+                  }}>
+                    {agent.avatar}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {agent.name}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px' }}>
+                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#16a34a', display: 'inline-block' }}></span>
+                      Actif · {formatDuration(agentSeconds[idx])}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
