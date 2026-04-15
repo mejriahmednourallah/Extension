@@ -65,6 +65,23 @@ _OPENROUTER_FALLBACK_EXCEPTIONS = (
 _PROVIDER_SEQUENCE = ("cerebras", "gemini", "groq", "openrouter")
 
 
+def _build_openrouter_model_sequence(models: list[str]) -> list[str]:
+    deepseek_model = str(getattr(settings, "deepseek_fallback_model", "") or "").strip()
+    base_models = [str(item).strip() for item in (models or []) if str(item).strip()]
+
+    if not deepseek_model:
+        return base_models
+
+    filtered = [item for item in base_models if item != deepseek_model]
+    if not filtered:
+        return [deepseek_model]
+
+    # Keep DeepSeek as before-last fallback in the model rotation sequence.
+    insert_index = max(0, len(filtered) - 1)
+    filtered.insert(insert_index, deepseek_model)
+    return filtered
+
+
 # ---------------------------------------------------------------------------
 # Local pre-classification heuristic
 # ---------------------------------------------------------------------------
@@ -267,12 +284,13 @@ async def analyze_posts_batch(
     gemini_keys = _build_key_pool(settings.gemini_api_key, settings.gemini_api_keys)
     cerebras_keys = _build_key_pool(settings.cerebras_api_key, settings.cerebras_api_keys)
     openrouter_keys = _build_key_pool(settings.openrouter_api_key, settings.openrouter_api_keys)
+    openrouter_models = _build_openrouter_model_sequence(list(settings.openrouter_models))
 
     rotation_map = {
         "cerebras": (_call_cerebras_with_model_rotation, cerebras_keys, list(settings.cerebras_models)),
         "gemini": (_call_gemini_with_model_rotation, gemini_keys, list(settings.gemini_models)),
         "groq": (_call_groq_with_model_rotation, groq_keys, list(settings.groq_models)),
-        "openrouter": (_call_openrouter_with_model_rotation, openrouter_keys, list(settings.openrouter_models)),
+        "openrouter": (_call_openrouter_with_model_rotation, openrouter_keys, openrouter_models),
     }
     key_map = {
         "cerebras": cerebras_keys, "gemini": gemini_keys,
@@ -855,7 +873,7 @@ async def analyze_post(post_text: str, client_name: str, keywords: list[str]) ->
     groq_models = list(settings.groq_models)
     gemini_models = list(settings.gemini_models)
     cerebras_models = list(settings.cerebras_models)
-    openrouter_models = list(settings.openrouter_models)
+    openrouter_models = _build_openrouter_model_sequence(list(settings.openrouter_models))
     provider_order = _PROVIDER_SEQUENCE
 
     provider_keys = {

@@ -64,6 +64,9 @@ class Settings:
     gemini_model: str = os.getenv("GEMINI_MODEL", "models/gemma-3-1b-it")
     cerebras_model: str = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b")
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp:free")
+    deepseek_fallback_model: str = os.getenv(
+        "DEEPSEEK_FALLBACK_MODEL", "deepseek/deepseek-r1-distill-qwen-1.5b"
+    )
     groq_models: tuple[str, ...] = _DEFAULT_GROQ_MODELS
     gemini_models: tuple[str, ...] = _DEFAULT_GEMINI_MODELS
     cerebras_models: tuple[str, ...] = _DEFAULT_CEREBRAS_MODELS

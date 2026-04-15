@@ -425,29 +425,152 @@ function pickCountByPatterns(text, patterns) {
   return 0;
 }
 
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function pickCountFromLabeledText(text, labels) {
+  const normalized = cleanText(text || "");
+  if (!normalized || !Array.isArray(labels) || labels.length === 0) {
+    return 0;
+  }
+
+  let best = 0;
+  for (const label of labels) {
+    const token = escapeRegex(label);
+    if (!token) {
+      continue;
+    }
+
+    const beforeMatch = normalized.match(new RegExp(`(\\d+[\\d\\s.,]*\\s*[kKmMbB]?)\\s*(?:${token})`, "i"));
+    const afterMatch = normalized.match(new RegExp(`(?:${token})\\s*[:\\-]?\\s*(\\d+[\\d\\s.,]*\\s*[kKmMbB]?)`, "i"));
+    const beforeCount = parseCountToken(beforeMatch && beforeMatch[1] ? beforeMatch[1] : "");
+    const afterCount = parseCountToken(afterMatch && afterMatch[1] ? afterMatch[1] : "");
+    best = Math.max(best, beforeCount, afterCount);
+  }
+
+  return best;
+}
+
+function pickCountFromElements(article, selectors) {
+  if (!article || !Array.isArray(selectors) || !selectors.length) {
+    return 0;
+  }
+
+  let best = 0;
+  for (const selector of selectors) {
+    const nodes = article.querySelectorAll(selector);
+    for (const node of nodes) {
+      const text = cleanText(node && (node.innerText || node.textContent || ""));
+      const aria = cleanText(node && node.getAttribute ? node.getAttribute("aria-label") : "");
+      const title = cleanText(node && node.getAttribute ? node.getAttribute("title") : "");
+      best = Math.max(best, parseCountToken(text), parseCountToken(aria), parseCountToken(title));
+    }
+  }
+
+  return best;
+}
+
+function pickCountFromCandidateAttributes(article, labels) {
+  if (!article || !Array.isArray(labels) || !labels.length) {
+    return 0;
+  }
+
+  const candidates = [];
+  const selectors = [
+    "a[aria-label]",
+    "span[aria-label]",
+    "div[aria-label]",
+    "a[title]",
+    "span[title]",
+    "div[title]",
+    "a[href*='comment']",
+    "a[href*='share']",
+    "a[href*='reaction']",
+  ];
+
+  for (const selector of selectors) {
+    const nodes = article.querySelectorAll(selector);
+    for (const node of nodes) {
+      const text = cleanText(node && (node.innerText || node.textContent || ""));
+      const aria = cleanText(node && node.getAttribute ? node.getAttribute("aria-label") : "");
+      const title = cleanText(node && node.getAttribute ? node.getAttribute("title") : "");
+
+      if (text) candidates.push(text);
+      if (aria) candidates.push(aria);
+      if (title) candidates.push(title);
+    }
+  }
+
+  let best = 0;
+  for (const candidate of candidates) {
+    best = Math.max(best, pickCountFromLabeledText(candidate, labels));
+  }
+
+  return best;
+}
+
 function extractEngagementCounts(article) {
   const text = cleanText(article && (article.innerText || article.textContent || ""));
 
-  const reactions = pickCountByPatterns(text, [
+  const reactionLabels = ["reactions", "reaction", "j'aime", "likes", "like", "إعجابات", "إعجاب", "اعجابات", "اعجاب"];
+  const commentLabels = ["commentaires", "commentaire", "comments", "comment", "تعليقات", "تعليق"];
+  const shareLabels = ["partages", "partage", "shares", "share", "مشاركات", "مشاركة"];
+
+  const reactionsFromText = pickCountByPatterns(text, [
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:reactions?|reaction|j['’]?aime|likes?)/i,
     /(?:reactions?|reaction|j['’]?aime|likes?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:إعجابات|إعجاب|اعجابات|اعجاب)/i,
     /(?:إعجابات|إعجاب|اعجابات|اعجاب)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
   ]);
 
-  const comments = pickCountByPatterns(text, [
+  const commentsFromText = pickCountByPatterns(text, [
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:commentaires?|comments?)/i,
     /(?:commentaires?|comments?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:تعليقات|تعليق)/i,
     /(?:تعليقات|تعليق)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
   ]);
 
-  const shares = pickCountByPatterns(text, [
+  const sharesFromText = pickCountByPatterns(text, [
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:partages?|shares?)/i,
     /(?:partages?|shares?)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i,
     /(\d+[\d\s.,]*\s*[kKmMbB]?)\s*(?:مشاركات|مشاركة)/i,
     /(?:مشاركات|مشاركة)\s*[:\-]?\s*(\d+[\d\s.,]*\s*[kKmMbB]?)/i
   ]);
+
+  const reactionsFromAttrs = pickCountFromCandidateAttributes(article, reactionLabels);
+  const commentsFromAttrs = pickCountFromCandidateAttributes(article, commentLabels);
+  const sharesFromAttrs = pickCountFromCandidateAttributes(article, shareLabels);
+
+  const reactionsFromDom = pickCountFromElements(article, [
+    "a[href*='ufi/reaction']",
+    "a[href*='reaction/profile']",
+  ]);
+
+  const commentsFromDom = pickCountFromElements(article, [
+    "a[href*='comment_id']",
+    "a[href*='comment_tracking']",
+    "a[href*='comment']",
+  ]);
+
+  const sharesFromDom = pickCountFromElements(article, [
+    "a[href*='shares']",
+    "a[href*='share_id']",
+    "a[href*='share']",
+  ]);
+
+  let reactions = Math.max(reactionsFromText, reactionsFromAttrs, reactionsFromDom);
+  let comments = Math.max(commentsFromText, commentsFromAttrs, commentsFromDom);
+  let shares = Math.max(sharesFromText, sharesFromAttrs, sharesFromDom);
+
+  // Compact counters often appear near translation toggles as "... 1 1".
+  if (comments === 0 && shares === 0) {
+    const compactMatch = text.match(/(?:see translation|voir la traduction|see more|voir plus)[^\d]{0,20}(\d+[\d\s.,]*\s*[kKmMbB]?)\s+(\d+[\d\s.,]*\s*[kKmMbB]?)(?:\s|$)/i);
+    if (compactMatch) {
+      comments = Math.max(comments, parseCountToken(compactMatch[1] || ""));
+      shares = Math.max(shares, parseCountToken(compactMatch[2] || ""));
+    }
+  }
 
   return {
     reactions_count: reactions,

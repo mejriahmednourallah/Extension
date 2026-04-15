@@ -136,7 +136,7 @@ async def analyze_posts(request: AnalyzeRequest) -> AnalyzeResponse:
                 ) or {"sentiment": "neutral", "score": 0.0, "category": "other",
                       "keywords_matched": [], "bad_buzz_suggestions": []}
                 llm_results[post.id] = fallback
-                logger.warning("Post %s fell back to local classification after batch failure.", post.id)
+                logger.info("Post %s used local fallback classification after batch failure.", post.id)
 
     # ------------------------------------------------------------------
     # Phase 3 — Persist + assemble results

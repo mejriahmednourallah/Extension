@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 _COOLDOWN_SECONDS = 5 * 60
 _last_sent_at_by_post_id: dict[str, float] = {}
 _NEGATIVE_SENTIMENTS = {"negative", "very_negative"}
+_SMTP_NETWORK_BACKOFF_SECONDS = 10 * 60
+_SMTP_NETWORK_ERRNOS = {101, 110, 111, 113}
+_smtp_blocked_until = 0.0
+_last_smtp_skip_log_at = 0.0
 
 
 def _get_value(payload: Any, key: str, default: Any = "") -> Any:
@@ -48,6 +52,9 @@ def _severity_color(sentiment: str) -> str:
 
 
 def send_alert(post: Any, result: Any, alert_email: str) -> bool:
+    global _smtp_blocked_until
+    global _last_smtp_skip_log_at
+
     sentiment = str(_get_value(result, "sentiment", "neutral")).lower().strip()
     if sentiment not in _NEGATIVE_SENTIMENTS:
         return False
@@ -72,6 +79,16 @@ def send_alert(post: Any, result: Any, alert_email: str) -> bool:
     sender = settings.alert_email_from or settings.smtp_user
     if not sender:
         logger.warning("Skipping email alert because sender email is not configured")
+        return False
+
+    now = time.time()
+    if _smtp_blocked_until > now:
+        if now - _last_smtp_skip_log_at >= 60:
+            logger.warning(
+                "Skipping email sends temporarily because SMTP network is unreachable (cooldown active for %ss).",
+                int(_smtp_blocked_until - now),
+            )
+            _last_smtp_skip_log_at = now
         return False
 
     suggestions = _get_value(result, "bad_buzz_suggestions", [])
@@ -134,5 +151,15 @@ def send_alert(post: Any, result: Any, alert_email: str) -> bool:
         _last_sent_at_by_post_id[post_id] = time.time()
         return True
     except Exception as exc:
-        logger.error("Failed to send email alert for post_id=%s: %s", post_id, exc)
+        err_no = getattr(exc, "errno", None)
+        if isinstance(exc, OSError) and err_no in _SMTP_NETWORK_ERRNOS:
+            _smtp_blocked_until = time.time() + _SMTP_NETWORK_BACKOFF_SECONDS
+            logger.warning(
+                "SMTP network unreachable for post_id=%s (errno=%s). Pausing email sends for %ss.",
+                post_id,
+                err_no,
+                _SMTP_NETWORK_BACKOFF_SECONDS,
+            )
+        else:
+            logger.error("Failed to send email alert for post_id=%s: %s", post_id, exc)
         return False
